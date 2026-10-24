@@ -22,13 +22,10 @@ jobs:
           distribution: "temurin"
           java-version: 17
 
-      - name: 📱 Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: 🍞 Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      - name: 📦 Install Node & Expo CLI
+      - name: 📦 Setup Node 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -41,19 +38,16 @@ jobs:
         run: |
           bun x expo prebuild --platform android --clean
 
-      - name: ⚙️ Grant Execute Permission to Gradlew
-        run: |
-          chmod +x android/gradlew
-
       - name: 🚀 Build APK via Gradle
         run: |
           cd android
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
 
       - name: 📤 Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Nuenime-Admin-Android-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 14
           if-no-files-found: error

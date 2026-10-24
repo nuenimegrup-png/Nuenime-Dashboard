@@ -1,6 +1,7 @@
 {
   "buildCommand": "npx expo export -p web",
   "outputDirectory": "dist",
+  "installCommand": "bun install || npm install --legacy-peer-deps",
   "framework": null,
   "rewrites": [
     {
