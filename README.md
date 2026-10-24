@@ -1,12 +1,12 @@
-# 💎 Nuenime Admin Portal & Mobile APK
+# Nuenime Admin Portal & Mobile APK
 
 Portal manajemen terpadu resmi untuk ekosistem **Nuenime Anime Streaming**, mencakup operasional keuangan, gamifikasi, moderasi komunitas, CMS konten, sistem pembaruan APK, dan integrasi donasi Saweria.
 
-Dibangun menggunakan **Expo SDK 54 (Expo Router v6)** dan **React Native Web**, mendukung deployment multi-platform: **Web Dashboard (Vercel)** dan **Android APK (GitHub Actions)**.
+Dibangun menggunakan **Expo SDK 54 (Expo Router v6)** dan **React Native Web**, mendukung deployment multi-platform: **Web Dashboard (Vercel)** dan **Android APK (GitHub Actions & GitHub Releases)**.
 
 ---
 
-## 🚀 Fitur & Modul Utama
+## Fitur & Modul Utama
 
 1. **Finance & Top Up (`/admin/finance`)**:
    - Verifikasi manual & otomatis transaksi top-up Dylan Crystal (Approve, Reject, Reverse).
@@ -25,7 +25,7 @@ Dibangun menggunakan **Expo SDK 54 (Expo Router v6)** dan **React Native Web**, 
    - Atur animasi kilau kristal dan syarat level/pembelian.
 
 5. **Gacha & Crystal Store (`/admin/gacha`)**:
-   - Atur banner gacha aktif, banner banner banner deskripsi, dan kalkulator simulator drop rate.
+   - Atur banner gacha aktif, deskripsi banner, dan kalkulator simulator drop rate.
    - Distribusi hadiah massal ke mailbox seluruh pemain.
 
 6. **Gamification & EXP (`/admin/gamification`)**:
@@ -34,7 +34,7 @@ Dibangun menggunakan **Expo SDK 54 (Expo Router v6)** dan **React Native Web**, 
 
 7. **Community & Chat Moderation (`/admin/community`)**:
    - Moderasi komentar episode dan feed anime real-time.
-   - Filter sensor kata terlarang (*Profanity Blacklist*) otomatis.
+   - Filter sensor kata terlarang (Profanity Blacklist) otomatis.
    - Nuenime Control Chat interaktif dengan navigasi list/chat thread di mobile.
 
 8. **Anime CMS & Streaming Server (`/admin/cms`)**:
@@ -46,16 +46,16 @@ Dibangun menggunakan **Expo SDK 54 (Expo Router v6)** dan **React Native Web**, 
    - Broadcast notifikasi massal ke seluruh aplikasi penonton.
 
 10. **Customer Support & Saweria (`/admin/support`)**:
-    - Konfigurasi tautan resmi Saweria Nuenime, banner hero GIF, dan daftar poin manfaat (*perks*).
+    - Konfigurasi tautan resmi Saweria Nuenime, banner hero GIF, dan daftar poin manfaat (perks).
     - Live Preview mockup kartu donasi pengguna.
     - Sistem tiket kendala pelanggan & CS chat balasan langsung.
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **Framework**: Expo SDK 54 / Expo Router v6
-- **Language**: TypeScript (`strict: true`)
+- **Language**: TypeScript (strict: true)
 - **UI Engine**: React Native Web & Vanilla CSS (Silver Liquid Glass Dark Theme)
 - **Database & Auth**: Supabase PostgreSQL + Realtime Subscription
 - **Icons**: Material Community Icons via `@expo/vector-icons`
@@ -63,14 +63,14 @@ Dibangun menggunakan **Expo SDK 54 (Expo Router v6)** dan **React Native Web**, 
 
 ---
 
-## 💻 Cara Menjalankan Secara Lokal
+## Cara Menjalankan Secara Lokal
 
 ### Menggunakan Script Cepat (Rekomendasi)
 ```powershell
 # Jalankan via PowerShell di folder project:
 .\run.ps1
 ```
-*Script akan otomatis memeriksa port 8082, memulai server, dan membuka browser ke `http://localhost:8082`.*
+*Script akan otomatis memeriksa port 8082, memulai server, dan membuka browser ke http://localhost:8082.*
 
 ### Menjalankan Manual
 ```bash
@@ -94,13 +94,13 @@ npm run check
 
 ---
 
-## 🌐 Panduan Deploy ke Vercel (Web Dashboard)
+## Panduan Deploy ke Vercel (Web Dashboard)
 
-Project ini sudah dilengkapi konfigurasi [`vercel.json`](./vercel.json) untuk Single Page Application (SPA) routing dan build otomatis Expo Router.
+Project ini sudah dilengkapi konfigurasi `vercel.json` untuk Single Page Application (SPA) routing dan build otomatis Expo Router.
 
 ### Langkah Deploy:
-1. Push project ke repository GitHub Anda (lihat panduan push di bawah).
-2. Buka dashboard [Vercel](https://vercel.com) dan klik **Add New Project**.
+1. Hubungkan repository GitHub Anda ke Vercel.
+2. Buka dashboard Vercel dan klik **Add New Project**.
 3. Import repository GitHub Anda.
 4. Pengaturan Build & Output:
    - **Framework Preset**: `Other`
@@ -109,28 +109,28 @@ Project ini sudah dilengkapi konfigurasi [`vercel.json`](./vercel.json) untuk Si
 5. Tambahkan **Environment Variables** di Vercel:
    - `EXPO_PUBLIC_SUPABASE_URL` : URL project Supabase Anda
    - `EXPO_PUBLIC_SUPABASE_ANON_KEY` : Anon public key Supabase Anda
-   - `EXPO_PUBLIC_API_BASE_URL` : URL backend API Anda (contoh: `https://api.aniraku.tech`)
+   - `EXPO_PUBLIC_API_BASE_URL` : URL backend API Anda (contoh: https://api.aniraku.tech)
    - `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` : Google OAuth Client ID Anda
-6. Klik **Deploy**. Vercel akan otomatis meng-export aplikasi web dan memberikan URL live domain HTTPS!
+6. Klik **Deploy**. Vercel akan otomatis meng-export aplikasi web dan memberikan URL live domain HTTPS.
 
 ---
 
-## 📱 Panduan Build Android APK Otomatis via GitHub Actions
+## Panduan Build Android APK Otomatis via GitHub Actions
 
-Project ini sudah menyertakan workflow GitHub Actions otomatis di [`.github/workflows/build-apk.yml`](./.github/workflows/build-apk.yml).
+Project ini menyertakan workflow otomatis di `.github/workflows/build-apk.yml`.
 
 ### Cara Kerja:
-- Setiap kali Anda melakukan **`git push`** ke branch `main` atau `master`, GitHub Actions akan otomatis:
+- Setiap kali Anda melakukan `git push` ke branch `main` atau `master`, GitHub Actions akan otomatis:
   1. Menyiapkan environment Java JDK 17 dan Android SDK.
   2. Melakukan prebuild native Android (`npx expo prebuild`).
   3. Meng-compile APK Android melalui Gradle.
-  4. Mengunggah file APK siap install ke tab **Artifacts**.
+  4. Mempublikasikan file APK langsung ke halaman **GitHub Releases**.
 
-### Cara Mengunduh APK Hasil Build:
-1. Buka tab **Actions** di halaman repository GitHub Anda.
-2. Klik workflow **Build Android APK** yang telah selesai (ditandai centang hijau ✅).
-3. Gulir ke bawah ke bagian **Artifacts**.
-4. Klik **`Nuenime-Admin-Android-APK`** untuk men-download file ZIP berisi file `.apk` yang siap di-install langsung di HP Android Anda.
+### Cara Mengunduh APK Langsung (GitHub Releases):
+1. Buka halaman **Releases** di repository GitHub:
+   https://github.com/nuenimegrup-png/Nuenime-Dashboard/releases
+2. Buka rilis terbaru (Latest).
+3. Klik file **`Nuenime-Admin.apk`** pada bagian Assets untuk langsung mengunduh dan menginstall di perangkat Android.
 
 ### Menjalankan Build APK Secara Manual:
 1. Masuk ke tab **Actions** di GitHub.
@@ -139,30 +139,20 @@ Project ini sudah menyertakan workflow GitHub Actions otomatis di [`.github/work
 
 ---
 
-## 📤 Langkah Eksekusi Push ke GitHub
+## Langkah Eksekusi Push ke GitHub
 
-Ikuti langkah-langkah berikut di terminal untuk menginisialisasi repository dan melakukan push:
+Ikuti langkah-langkah berikut di terminal jika ingin melakukan update atau commit manual:
 
 ```powershell
 # 1. Masuk ke direktori project
 cd D:\admin-nuenime
 
-# 2. Inisialisasi Git repository lokal
-git init
-
-# 3. Tambahkan semua file project
+# 2. Tambahkan perubahan file project
 git add .
 
-# 4. Buat initial commit
-git commit -m "feat: initial commit nuenime admin portal with vercel & github actions apk build"
+# 3. Buat commit
+git commit -m "update: documentation and project files"
 
-# 5. Atur branch utama ke 'main'
-git branch -M main
-
-# 6. Hubungkan dengan remote repository GitHub Anda (ganti URL dengan repo Anda):
-git remote add origin https://github.com/USERNAME_ANDA/NAMA_REPO_ANDA.git
-
-# 7. Push ke GitHub
-git push -u origin main
+# 4. Push ke GitHub
+git push origin main
 ```
-*Setelah perintah push selesai, GitHub Actions akan langsung mulai mem-build APK Android Anda secara otomatis, dan project siap dihubungkan ke Vercel!*
