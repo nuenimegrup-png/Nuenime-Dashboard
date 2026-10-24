@@ -7,6 +7,9 @@ on:
       - master
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     name: Build & Package Android APK
@@ -44,10 +47,35 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
 
-      - name: 📤 Upload APK Artifact
+      - name: 📤 Upload APK Artifact (Workflow Backup)
         uses: actions/upload-artifact@v4
         with:
           name: Nuenime-Admin-Android-APK
           path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 14
           if-no-files-found: error
+
+      - name: 🏷️ Prepare APK for Release
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk Nuenime-Admin.apk
+
+      - name: 🚀 Publish Directly to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "Nuenime Admin Portal v1.0.${{ github.run_number }}"
+          body: |
+            ## 💎 Nuenime Admin Portal - APK Android Release
+
+            Rilis otomatis aplikasi Android Admin Nuenime hasil kompilasi GitHub Actions.
+
+            - **Versi Tag**: `v1.0.${{ github.run_number }}`
+            - **Commit**: `${{ github.sha }}`
+            - **Platform**: Android (APK siap install)
+
+            ### 📲 Unduh & Install
+            Unduh langsung file **`Nuenime-Admin.apk`** pada lampiran aset di bawah dan buka di perangkat Android Anda.
+          files: Nuenime-Admin.apk
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          prerelease: false
