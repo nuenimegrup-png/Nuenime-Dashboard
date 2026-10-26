@@ -12,69 +12,73 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build & Package Android APK
+    name: Build and Package Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: ☕ Setup Java JDK 17
+      - name: Setup Java JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: "temurin"
           java-version: 17
 
-      - name: 🍞 Setup Bun
+      - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      - name: 📦 Setup Node 20
+      - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: 📥 Install Dependencies
+      - name: Install Dependencies
         run: |
           bun install
 
-      - name: 🔨 Expo Prebuild (Generate Android Project)
+      - name: Expo Prebuild (Generate Android Project)
         run: |
           bun x expo prebuild --platform android --clean
 
-      - name: 🚀 Build APK via Gradle
+      - name: Build Standalone Release APK via Gradle
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleRelease --no-daemon
 
-      - name: 📤 Upload APK Artifact (Workflow Backup)
+      - name: Upload APK Artifact (Workflow Backup)
         uses: actions/upload-artifact@v4
         with:
           name: Nuenime-Admin-Android-APK
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: android/app/build/outputs/apk/release/*.apk
           retention-days: 14
           if-no-files-found: error
 
-      - name: 🏷️ Prepare APK for Release
+      - name: Prepare APK for Release
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk Nuenime-Admin.apk
+          if [ -f android/app/build/outputs/apk/release/app-release.apk ]; then
+            cp android/app/build/outputs/apk/release/app-release.apk Nuenime-Admin.apk
+          else
+            cp android/app/build/outputs/apk/release/*.apk Nuenime-Admin.apk
+          fi
 
-      - name: 🚀 Publish Directly to GitHub Releases
+      - name: Publish Directly to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
           name: "Nuenime Admin Portal v1.0.${{ github.run_number }}"
           body: |
-            ## 💎 Nuenime Admin Portal - APK Android Release
+            ## Nuenime Admin Portal - APK Android Release
 
-            Rilis otomatis aplikasi Android Admin Nuenime hasil kompilasi GitHub Actions.
+            Rilis resmi aplikasi Android Admin Nuenime (Standalone Release).
 
             - **Versi Tag**: `v1.0.${{ github.run_number }}`
             - **Commit**: `${{ github.sha }}`
-            - **Platform**: Android (APK siap install)
+            - **Platform**: Android (APK Standalone siap pakai)
 
-            ### 📲 Unduh & Install
-            Unduh langsung file **`Nuenime-Admin.apk`** pada lampiran aset di bawah dan buka di perangkat Android Anda.
+            ### Unduh dan Install
+            Unduh langsung file **`Nuenime-Admin.apk`** pada lampiran aset di bawah dan install di perangkat Android Anda. Aplikasi berjalan mandiri tanpa perlu server pengembang.
           files: Nuenime-Admin.apk
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: false
