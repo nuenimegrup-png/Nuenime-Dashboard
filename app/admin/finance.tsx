@@ -31,16 +31,14 @@ import {
   savePaymentGatewaysConfig,
   getAdminCrystalPackages,
   saveAdminCrystalPackages,
+  deleteAdminCrystalPackage,
   formatRupiah,
   formatCrystalAmount,
 } from "@/lib/admin-service";
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 function formatRupiahShort(val: number): string {
-  if (val >= 1_000_000_000) return `Rp ${(val / 1_000_000_000).toFixed(1)}M`;
-  if (val >= 1_000_000) return `Rp ${(val / 1_000_000).toFixed(1)}Jt`;
-  if (val >= 1_000) return `Rp ${(val / 1_000).toFixed(0)}K`;
-  return `Rp ${val.toLocaleString("id-ID")}`;
+  return `Rp ${Math.round(val || 0).toLocaleString("id-ID")}`;
 }
 
 type PeriodFilter = "today" | "week" | "month" | "all";
@@ -252,6 +250,50 @@ export default function AdminFinanceScreen() {
       Alert.alert("Tersimpan", "Paket Crystal berhasil diperbarui.");
     } catch {
       Alert.alert("Gagal", "Tidak dapat menyimpan paket Crystal.");
+    }
+  };
+
+  // Handle Delete Package
+  const handleDeletePackage = (pkg: CrystalPackage) => {
+    hapticWarning();
+    const confirmMsg = `Hapus paket "${pkg.name}" (${pkg.amountFormatted} Crystal - ${pkg.priceFormatted})?\n\nTindakan ini akan menghapus paket dari daftar top up di aplikasi secara real-time.`;
+
+    const executeDelete = async () => {
+      try {
+        const res = await deleteAdminCrystalPackage(pkg.id, mockAdmin);
+        if (res.success) {
+          hapticSuccess();
+          setPackages(res.packages);
+          if (editingPkg?.id === pkg.id) {
+            setShowPkgModal(false);
+            setEditingPkg(null);
+          }
+          Alert.alert("Berhasil Dihapus", `Paket "${pkg.name}" telah dihapus.`);
+        } else {
+          Alert.alert("Gagal", res.error || "Tidak dapat menghapus paket Crystal.");
+        }
+      } catch (err: any) {
+        Alert.alert("Gagal", err?.message || "Terjadi kesalahan saat menghapus paket.");
+      }
+    };
+
+    if (Platform.OS === "web") {
+      if (typeof window !== "undefined" && window.confirm(confirmMsg)) {
+        void executeDelete();
+      }
+    } else {
+      Alert.alert(
+        "Hapus Paket Crystal",
+        confirmMsg,
+        [
+          { text: "Batal", style: "cancel" },
+          {
+            text: "Hapus",
+            style: "destructive",
+            onPress: () => void executeDelete(),
+          },
+        ]
+      );
     }
   };
 
@@ -1317,7 +1359,7 @@ _Laporan digenerate dari Admin Portal Nuenime_`;
                 </View>
               </View>
               <Text style={[styles.reportValText, !isWide && styles.reportValTextMobile]}>
-                {((reportMetrics.totalCrystals || 0) / 1000).toFixed(1)}K
+                {(reportMetrics.totalCrystals || 0).toLocaleString("id-ID")}
               </Text>
               <Text style={styles.reportLabelText}>Dylan Crystal Diterbitkan</Text>
               <Text style={styles.reportFootnote}>
@@ -1584,16 +1626,25 @@ _Laporan digenerate dari Admin Portal Nuenime_`;
                 </View>
                 <View style={styles.packagePriceRow}>
                   <Text style={styles.packagePrice}>{pkg.priceFormatted}</Text>
-                  <Pressable
-                    onPress={() => {
-                      setEditingPkg({ ...pkg });
-                      setShowPkgModal(true);
-                    }}
-                    style={[styles.editBtn, !isWide && styles.editBtnMobile]}
-                  >
-                    <AppIcon name="pencil" size={13} color="#FFFFFF" />
-                    <Text style={styles.editBtnText}>Edit</Text>
-                  </Pressable>
+                  <View style={styles.packageActions}>
+                    <Pressable
+                      onPress={() => {
+                        setEditingPkg({ ...pkg });
+                        setShowPkgModal(true);
+                      }}
+                      style={[styles.editBtn, !isWide && styles.editBtnMobile]}
+                    >
+                      <AppIcon name="pencil" size={13} color="#FFFFFF" />
+                      <Text style={styles.editBtnText}>Edit</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => handleDeletePackage(pkg)}
+                      style={[styles.deletePkgBtn, !isWide && styles.deletePkgBtnMobile]}
+                    >
+                      <AppIcon name="trash-can-outline" size={13} color="#EF4444" />
+                      <Text style={styles.deletePkgBtnText}>Hapus</Text>
+                    </Pressable>
+                  </View>
                 </View>
               </View>
             ))}
@@ -1803,6 +1854,16 @@ _Laporan digenerate dari Admin Portal Nuenime_`;
               </>
             )}
             <View style={[styles.modalActionRow, !isWide && styles.modalActionRowMobile]}>
+              {editingPkg && packages.some((p) => p.id === editingPkg.id) && (
+                <Pressable
+                  onPress={() => handleDeletePackage(editingPkg)}
+                  style={[styles.modalDeleteBtn, !isWide && styles.modalBtnMobile]}
+                >
+                  <AppIcon name="trash-can-outline" size={14} color="#EF4444" />
+                  <Text style={styles.modalDeleteText}>Hapus Paket</Text>
+                </Pressable>
+              )}
+              {isWide && <View style={{ flex: 1 }} />}
               <Pressable
                 onPress={() => setShowPkgModal(false)}
                 style={[styles.modalCancelBtn, !isWide && styles.modalBtnMobile]}
@@ -2586,6 +2647,44 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: "#FFFFFF",
   },
+  packageActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  deletePkgBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 5,
+    backgroundColor: "rgba(239, 68, 68, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.35)",
+  },
+  deletePkgBtnText: {
+    fontFamily: "Nunito-Bold",
+    fontSize: 11,
+    color: "#EF4444",
+  },
+  modalDeleteBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 6,
+    backgroundColor: "rgba(239, 68, 68, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.4)",
+  },
+  modalDeleteText: {
+    fontFamily: "Nunito-Bold",
+    fontSize: 12,
+    color: "#EF4444",
+  },
 
   // ── Package Stat Rows in Reports
   pkgStatRow: {
@@ -3124,6 +3223,12 @@ const styles = StyleSheet.create({
     padding: 14,
   },
   editBtnMobile: {
+    minHeight: 34,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  deletePkgBtnMobile: {
     minHeight: 34,
     paddingHorizontal: 10,
     paddingVertical: 6,

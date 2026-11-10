@@ -102,27 +102,42 @@ const DEFAULT_QUESTS: QuestConfig[] = [
   },
 ];
 
+// ─── IN-MEMORY GLOBAL CACHE UNTUK INSTANT ZERO-DELAY SWITCHING (0ms) ───
+let memLeaderboardUsersCache: AdminUserListItem[] | null = null;
+let memQuestsCache: QuestConfig[] | null = null;
+let memExpRulesCache: {
+  watchExp: string;
+  commentExp: string;
+  dailyLoginExp: string;
+  weekendBoostActive: boolean;
+  weekendBoostMultiplier: string;
+} | null = null;
+
 export default function AdminGamificationScreen() {
   const auth = useAnirakuAuth();
   const { width } = useWindowDimensions();
   const isWide = width >= 860;
 
   const [activeTab, setActiveTab] = useState<GamificationTab>("leaderboard");
-  const [loading, setLoading] = useState(true);
-  const [users, setUsers] = useState<AdminUserListItem[]>([]);
+  const [loading, setLoading] = useState(memLeaderboardUsersCache === null);
+  const [users, setUsers] = useState<AdminUserListItem[]>(memLeaderboardUsersCache || []);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedTierFilter, setSelectedTierFilter] = useState<string>("ALL");
 
+  // ─── PAGINATION STATE (KONSISTEN DENGAN USERS & FINANCE) ───
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
   // ─── EXP RULES STATE ───
-  const [watchExp, setWatchExp] = useState("20");
-  const [commentExp, setCommentExp] = useState("5");
-  const [dailyLoginExp, setDailyLoginExp] = useState("10");
-  const [weekendBoostActive, setWeekendBoostActive] = useState(true);
-  const [weekendBoostMultiplier, setWeekendBoostMultiplier] = useState("1.5");
+  const [watchExp, setWatchExp] = useState(memExpRulesCache?.watchExp || "20");
+  const [commentExp, setCommentExp] = useState(memExpRulesCache?.commentExp || "5");
+  const [dailyLoginExp, setDailyLoginExp] = useState(memExpRulesCache?.dailyLoginExp || "10");
+  const [weekendBoostActive, setWeekendBoostActive] = useState(memExpRulesCache?.weekendBoostActive ?? true);
+  const [weekendBoostMultiplier, setWeekendBoostMultiplier] = useState(memExpRulesCache?.weekendBoostMultiplier || "1.5");
   const [savingRules, setSavingRules] = useState(false);
 
   // ─── QUESTS STATE ───
-  const [quests, setQuests] = useState<QuestConfig[]>(DEFAULT_QUESTS);
+  const [quests, setQuests] = useState<QuestConfig[]>(memQuestsCache || DEFAULT_QUESTS);
   const [editingQuest, setEditingQuest] = useState<QuestConfig | null>(null);
   const [isCreatingNewQuest, setIsCreatingNewQuest] = useState(false);
 
@@ -162,14 +177,17 @@ export default function AdminGamificationScreen() {
     };
   }, [auth.user, auth.profile]);
 
-  // ─── LOAD DATA (USERS, EXP RULES & QUESTS) ───
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  // ─── LOAD DATA (USERS, EXP RULES & QUESTS - SWR ZERO DELAY BERTAHAP) ───
+  const loadData = useCallback(async (isManual = false) => {
+    if (isManual || !memLeaderboardUsersCache) {
+      setLoading(true);
+    }
     try {
-      // 1. Ambil Leaderboard Pengguna
-      const list = await getAdminUsersList();
+      // 1. Ambil Leaderboard Seluruh Pengguna (tanpa batasan slice 50)
+      const list = await getAdminUsersList(undefined, { forceRefresh: isManual });
       const sorted = [...list].sort((a, b) => b.level - a.level || b.exp - a.exp);
-      setUsers(sorted.slice(0, 50));
+      memLeaderboardUsersCache = sorted;
+      setUsers(sorted);
 
       // 2. Ambil Aturan EXP dari system_configs
       const { data: expConfigData } = await supabase
@@ -180,11 +198,19 @@ export default function AdminGamificationScreen() {
 
       if (expConfigData?.value && typeof expConfigData.value === "object") {
         const val = expConfigData.value as any;
-        if (typeof val.watch_episode === "number") setWatchExp(String(val.watch_episode));
-        if (typeof val.comment === "number") setCommentExp(String(val.comment));
-        if (typeof val.daily_login === "number") setDailyLoginExp(String(val.daily_login));
-        if (typeof val.weekend_boost_active === "boolean") setWeekendBoostActive(val.weekend_boost_active);
-        if (typeof val.weekend_multiplier === "number") setWeekendBoostMultiplier(String(val.weekend_multiplier));
+        const newRules = {
+          watchExp: typeof val.watch_episode === "number" ? String(val.watch_episode) : "20",
+          commentExp: typeof val.comment === "number" ? String(val.comment) : "5",
+          dailyLoginExp: typeof val.daily_login === "number" ? String(val.daily_login) : "10",
+          weekendBoostActive: typeof val.weekend_boost_active === "boolean" ? val.weekend_boost_active : true,
+          weekendBoostMultiplier: typeof val.weekend_multiplier === "number" ? String(val.weekend_multiplier) : "1.5",
+        };
+        memExpRulesCache = newRules;
+        setWatchExp(newRules.watchExp);
+        setCommentExp(newRules.commentExp);
+        setDailyLoginExp(newRules.dailyLoginExp);
+        setWeekendBoostActive(newRules.weekendBoostActive);
+        setWeekendBoostMultiplier(newRules.weekendBoostMultiplier);
       }
 
       // 3. Ambil Quests dari system_configs
@@ -195,12 +221,16 @@ export default function AdminGamificationScreen() {
         .maybeSingle();
 
       if (questsData?.value && Array.isArray(questsData.value) && questsData.value.length > 0) {
+        memQuestsCache = questsData.value;
         setQuests(questsData.value);
       } else {
         const local = await AsyncStorage.getItem(STORAGE_QUESTS_KEY);
         if (local) {
           const parsed = JSON.parse(local);
-          if (Array.isArray(parsed) && parsed.length > 0) setQuests(parsed);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            memQuestsCache = parsed;
+            setQuests(parsed);
+          }
         }
       }
     } catch (err: any) {
@@ -213,6 +243,11 @@ export default function AdminGamificationScreen() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Reset pagination saat filter atau query berubah
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, selectedTierFilter]);
 
   // ─── FILTERED LEADERBOARD ───
   const filteredUsers = useMemo(() => {
@@ -230,6 +265,14 @@ export default function AdminGamificationScreen() {
       return true;
     });
   }, [users, selectedTierFilter, searchQuery]);
+
+  // ─── PAGINASI LEADERBOARD (KONSISTEN & BERTAHAP) ───
+  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / pageSize));
+
+  const paginatedUsers = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredUsers.slice(start, start + pageSize);
+  }, [filteredUsers, currentPage, pageSize]);
 
   // Top 3 Podium
   const top1 = users[0] || null;
@@ -566,7 +609,7 @@ export default function AdminGamificationScreen() {
   return (
     <AdminLayout
       title="Gamification & Leaderboard"
-      subtitle="Kelola aturan level, kurva EXP, misi harian/mingguan, simulator progresi, dan pantau peringkat Top 50"
+      subtitle="Kelola aturan level, kurva EXP, misi harian/mingguan, simulator progresi, dan pantau peringkat seluruh pemain"
       mobileTitle="Gamifikasi"
       mobileSubtitle="Aturan level & misi"
       activeKey="gamification"
@@ -579,7 +622,7 @@ export default function AdminGamificationScreen() {
           </View>
           <View style={styles.kpiStripTextWrap}>
             <Text style={styles.kpiStripLabel} numberOfLines={1}>
-              {!isWide ? "Leaderboard" : "Leaderboard Top 50"}
+              {!isWide ? "Leaderboard" : "Peringkat Pemain"}
             </Text>
             <Text style={styles.kpiStripVal} numberOfLines={1}>
               {!isWide ? `${users.length} Pemain` : `${users.length} Pemain Aktif`}
@@ -654,7 +697,7 @@ export default function AdminGamificationScreen() {
       {/* ─── TAB NAVIGATION (CHIP STYLE SILVER LIQUID GLASS) ─── */}
       <View style={[styles.tabNavWrap, !isWide && styles.tabNavWrapMobile]}>
         {[
-          { key: "leaderboard", label: `Leaderboard (${users.length})`, fullLabel: `Leaderboard Top 50 (${users.length})`, icon: "trophy-outline" },
+          { key: "leaderboard", label: `Leaderboard (${users.length})`, fullLabel: `Peringkat Leaderboard (${users.length})`, icon: "trophy-outline" },
           { key: "quests", label: `Misi & Quests (${quests.length})`, fullLabel: `Misi & Quests (${quests.length})`, icon: "calendar-check" },
           { key: "exp_rules", label: "Sistem & Kurva EXP", fullLabel: "Sistem & Kurva EXP", icon: "cog-outline" },
           { key: "simulator", label: "Simulator Progresi", fullLabel: "Simulator & Kalkulator Progresi", icon: "calculator-variant-outline" },
@@ -707,7 +750,7 @@ export default function AdminGamificationScreen() {
         </View>
       )}
 
-      {loading ? (
+      {loading && users.length === 0 ? (
         <View style={styles.loadingWrap}>
           <ActivityIndicator size="large" color="#38BDF8" />
           <Text style={styles.loadingText}>Memuat data gamifikasi dan peringkat dari database...</Text>
@@ -830,7 +873,7 @@ export default function AdminGamificationScreen() {
                   <Pressable
                     onPress={() => {
                       hapticLight();
-                      loadData();
+                      loadData(true);
                     }}
                     style={styles.silverLiquidSecondaryBtn}
                   >
@@ -856,20 +899,21 @@ export default function AdminGamificationScreen() {
                         <Text style={[styles.desktopTh, { width: 170, textAlign: "right", paddingRight: 4 }]}>AKSI</Text>
                       </View>
 
-                      {filteredUsers.map((u, index) => {
+                      {paginatedUsers.map((u, index) => {
+                        const globalRank = (currentPage - 1) * pageSize + index + 1;
                         const tier = getTierForLevel(u.level).currentTier;
                         return (
                           <View key={u.id} style={styles.desktopTrRow}>
                             <Text
                               style={[
                                 styles.rankNumber,
-                                index === 0 && { color: "#F59E0B" },
-                                index === 1 && { color: "#CBD5E1" },
-                                index === 2 && { color: "#D97706" },
+                                globalRank === 1 && { color: "#F59E0B" },
+                                globalRank === 2 && { color: "#CBD5E1" },
+                                globalRank === 3 && { color: "#D97706" },
                                 { width: 70 },
                               ]}
                             >
-                              #{index + 1}
+                              #{globalRank}
                             </Text>
                             <View style={{ flex: 3 }}>
                               <Text style={styles.tdBold} numberOfLines={1}>{u.username}</Text>
@@ -944,20 +988,21 @@ export default function AdminGamificationScreen() {
                             <Text style={[styles.th, { flex: 1.6, textAlign: "right" }]}>AKSI</Text>
                           </View>
 
-                          {filteredUsers.map((u, index) => {
+                          {paginatedUsers.map((u, index) => {
+                            const globalRank = (currentPage - 1) * pageSize + index + 1;
                             const tier = getTierForLevel(u.level).currentTier;
                             return (
                               <View key={u.id} style={styles.trRow}>
                                 <Text
                                   style={[
                                     styles.rankNumber,
-                                    index === 0 && { color: "#F59E0B" },
-                                    index === 1 && { color: "#CBD5E1" },
-                                    index === 2 && { color: "#D97706" },
+                                    globalRank === 1 && { color: "#F59E0B" },
+                                    globalRank === 2 && { color: "#CBD5E1" },
+                                    globalRank === 3 && { color: "#D97706" },
                                     { flex: 1 },
                                   ]}
                                 >
-                                  #{index + 1}
+                                  #{globalRank}
                                 </Text>
                                 <View style={{ flex: 2.6 }}>
                                   <Text style={styles.tdBold} numberOfLines={1}>{u.username}</Text>
@@ -1017,6 +1062,172 @@ export default function AdminGamificationScreen() {
                       </ScrollView>
                     </View>
                   )}
+
+                {/* ── PAGINATION (KONSISTEN DENGAN USERS & FINANCE) ── */}
+                {filteredUsers.length > 0 && (
+                  isWide ? (
+                    <View style={styles.paginationRow}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 14 }}>
+                        <Text style={styles.paginationInfo}>
+                          Menampilkan {filteredUsers.length === 0 ? 0 : (currentPage - 1) * pageSize + 1} -{" "}
+                          {Math.min(currentPage * pageSize, filteredUsers.length)} dari {filteredUsers.length} pemain
+                          {" "}(Halaman {currentPage} dari {totalPages})
+                        </Text>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                          <Text style={[styles.paginationInfo, { fontSize: 11 }]}>Per hal:</Text>
+                          {[10, 25, 50, 100].map((sz) => (
+                            <Pressable
+                              key={sz}
+                              onPress={() => {
+                                hapticLight();
+                                setPageSize(sz);
+                                setCurrentPage(1);
+                              }}
+                              style={[styles.pageSizeBtn, pageSize === sz && styles.pageSizeBtnActive]}
+                            >
+                              <Text style={[styles.pageSizeText, pageSize === sz && styles.pageSizeTextActive]}>
+                                {sz}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                      </View>
+
+                      <View style={styles.paginationBtns}>
+                        <Pressable
+                          onPress={() => {
+                            hapticLight();
+                            setCurrentPage((p) => Math.max(1, p - 1));
+                          }}
+                          style={[styles.pageBtn, currentPage === 1 && styles.pageBtnDisabled]}
+                          disabled={currentPage === 1}
+                        >
+                          <AppIcon name="chevron-left" size={16} color={currentPage === 1 ? "#334155" : "#94A3B8"} />
+                          <Text style={[styles.pageBtnText, currentPage === 1 && styles.pageBtnTextDisabled]}>Prev</Text>
+                        </Pressable>
+
+                        {(() => {
+                          const items: (number | "dot")[] = [];
+                          if (totalPages <= 5) {
+                            for (let i = 1; i <= totalPages; i++) items.push(i);
+                          } else {
+                            items.push(1);
+                            if (currentPage > 2) items.push("dot");
+                            if (currentPage !== 1 && currentPage !== totalPages) items.push(currentPage);
+                            if (currentPage < totalPages - 1) items.push("dot");
+                            items.push(totalPages);
+                          }
+                          return items.map((item, idx) =>
+                            item === "dot" ? (
+                              <Text key={`dot-${idx}`} style={styles.paginationDot}>.</Text>
+                            ) : (
+                              <Pressable
+                                key={`page-${item}`}
+                                onPress={() => { hapticLight(); setCurrentPage(item); }}
+                                style={[styles.pageNumBtn, currentPage === item && styles.pageNumBtnActive]}
+                              >
+                                <Text style={[styles.pageNumText, currentPage === item && styles.pageNumTextActive]}>{item}</Text>
+                              </Pressable>
+                            )
+                          );
+                        })()}
+
+                        <Pressable
+                          onPress={() => {
+                            hapticLight();
+                            setCurrentPage((p) => Math.min(totalPages, p + 1));
+                          }}
+                          style={[styles.pageBtn, currentPage === totalPages && styles.pageBtnDisabled]}
+                          disabled={currentPage === totalPages}
+                        >
+                          <Text style={[styles.pageBtnText, currentPage === totalPages && styles.pageBtnTextDisabled]}>Next</Text>
+                          <AppIcon name="chevron-right" size={16} color={currentPage === totalPages ? "#334155" : "#94A3B8"} />
+                        </Pressable>
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={styles.paginationMobileWrap}>
+                      <Text style={styles.paginationInfoMobile}>
+                        Menampilkan {filteredUsers.length === 0 ? 0 : (currentPage - 1) * pageSize + 1} -{" "}
+                        {Math.min(currentPage * pageSize, filteredUsers.length)} dari {filteredUsers.length} pemain
+                        {" "}(Hal {currentPage} dari {totalPages})
+                      </Text>
+                      <View style={styles.pageSizeMobileRow}>
+                        <Text style={[styles.paginationInfoMobile, { fontSize: 11 }]}>Per halaman:</Text>
+                        <View style={{ flexDirection: "row", gap: 6 }}>
+                          {[10, 25, 50].map((sz) => (
+                            <Pressable
+                              key={sz}
+                              onPress={() => {
+                                hapticLight();
+                                setPageSize(sz);
+                                setCurrentPage(1);
+                              }}
+                              style={[styles.pageSizeBtn, pageSize === sz && styles.pageSizeBtnActive]}
+                            >
+                              <Text style={[styles.pageSizeText, pageSize === sz && styles.pageSizeTextActive]}>
+                                {sz}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                      </View>
+                      <View style={styles.paginationBtnsMobile}>
+                        <Pressable
+                          onPress={() => {
+                            hapticLight();
+                            setCurrentPage((p) => Math.max(1, p - 1));
+                          }}
+                          style={[styles.pageBtn, currentPage === 1 && styles.pageBtnDisabled, { flex: 1, justifyContent: "center" }]}
+                          disabled={currentPage === 1}
+                        >
+                          <AppIcon name="chevron-left" size={15} color={currentPage === 1 ? "#334155" : "#94A3B8"} />
+                          <Text style={[styles.pageBtnText, currentPage === 1 && styles.pageBtnTextDisabled]}>Prev</Text>
+                        </Pressable>
+
+                        <View style={{ flexDirection: "row", gap: 4, alignItems: "center" }}>
+                          {(() => {
+                            const items: (number | "dot")[] = [];
+                            if (totalPages <= 4) {
+                              for (let i = 1; i <= totalPages; i++) items.push(i);
+                            } else {
+                              items.push(1);
+                              if (currentPage > 2) items.push("dot");
+                              if (currentPage !== 1 && currentPage !== totalPages) items.push(currentPage);
+                              if (currentPage < totalPages - 1) items.push("dot");
+                              items.push(totalPages);
+                            }
+                            return items.map((item, idx) =>
+                              item === "dot" ? (
+                                <Text key={`m-dot-${idx}`} style={styles.paginationDot}>.</Text>
+                              ) : (
+                                <Pressable
+                                  key={`m-page-${item}`}
+                                  onPress={() => { hapticLight(); setCurrentPage(item); }}
+                                  style={[styles.pageNumBtn, currentPage === item && styles.pageNumBtnActive]}
+                                >
+                                  <Text style={[styles.pageNumText, currentPage === item && styles.pageNumTextActive]}>{item}</Text>
+                                </Pressable>
+                              )
+                            );
+                          })()}
+                        </View>
+
+                        <Pressable
+                          onPress={() => {
+                            hapticLight();
+                            setCurrentPage((p) => Math.min(totalPages, p + 1));
+                          }}
+                          style={[styles.pageBtn, currentPage === totalPages && styles.pageBtnDisabled, { flex: 1, justifyContent: "center" }]}
+                          disabled={currentPage === totalPages}
+                        >
+                          <Text style={[styles.pageBtnText, currentPage === totalPages && styles.pageBtnTextDisabled]}>Next</Text>
+                          <AppIcon name="chevron-right" size={15} color={currentPage === totalPages ? "#334155" : "#94A3B8"} />
+                        </Pressable>
+                      </View>
+                    </View>
+                  )
+                )}
               </View>
         </View>
       )}
@@ -1089,11 +1300,11 @@ export default function AdminGamificationScreen() {
                         <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                           <View style={styles.rewardChip}>
                             <AppIcon name="trending-up" size={12} color="#10B981" />
-                            <Text style={[styles.rewardChipText, { color: "#10B981" }]}>+{q.expReward} EXP</Text>
+                            <Text style={[styles.rewardChipText, { color: "#10B981" }]}>+{q.expReward.toLocaleString("id-ID")} EXP</Text>
                           </View>
                           <View style={styles.rewardChip}>
                             <AppIcon name="crystal-ball" size={12} color="#38BDF8" />
-                            <Text style={[styles.rewardChipText, { color: "#38BDF8" }]}>+{q.crystalReward} Crystal</Text>
+                            <Text style={[styles.rewardChipText, { color: "#38BDF8" }]}>+{q.crystalReward.toLocaleString("id-ID")} Crystal</Text>
                           </View>
                         </View>
 
@@ -2974,5 +3185,122 @@ const styles = StyleSheet.create({
   simResultDividerMobile: {
     width: "100%",
     height: 1,
+  },
+
+  // ─── Pagination Styles (Consistent with Users & Finance) ───
+  paginationRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingTop: 16,
+    paddingBottom: 4,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.06)",
+    marginTop: 8,
+  },
+  paginationMobileWrap: {
+    paddingTop: 12,
+    paddingBottom: 4,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.06)",
+    marginTop: 10,
+    gap: 9,
+  },
+  paginationInfoMobile: {
+    fontFamily: "Nunito-SemiBold",
+    fontSize: 11.5,
+    color: "#94A3B8",
+  },
+  pageSizeMobileRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  paginationBtnsMobile: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 4,
+  },
+  paginationInfo: {
+    fontFamily: "Nunito-Regular",
+    fontSize: 12,
+    color: "#94A3B8",
+  },
+  paginationBtns: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  pageBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.10)",
+  },
+  pageBtnDisabled: {
+    opacity: 0.4,
+    backgroundColor: "rgba(255, 255, 255, 0.02)",
+    borderColor: "rgba(255, 255, 255, 0.04)",
+  },
+  pageBtnText: {
+    fontFamily: "Nunito-Bold",
+    fontSize: 12,
+    color: "#E2E8F0",
+  },
+  pageBtnTextDisabled: {
+    color: "#64748B",
+  },
+  pageNumBtn: {
+    minWidth: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 6,
+    backgroundColor: "rgba(255, 255, 255, 0.04)",
+    paddingHorizontal: 6,
+  },
+  pageNumBtnActive: {
+    backgroundColor: "#38BDF8",
+  },
+  pageNumText: {
+    fontFamily: "Nunito-Bold",
+    fontSize: 12,
+    color: "#94A3B8",
+  },
+  pageNumTextActive: {
+    color: "#0F172A",
+    fontFamily: "Nunito-Black",
+  },
+  pageSizeBtn: {
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 4,
+    backgroundColor: "rgba(255, 255, 255, 0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.10)",
+  },
+  pageSizeBtnActive: {
+    backgroundColor: "rgba(56, 189, 248, 0.20)",
+    borderColor: "#38BDF8",
+  },
+  pageSizeText: {
+    fontFamily: "Nunito-Bold",
+    fontSize: 11,
+    color: "#94A3B8",
+  },
+  pageSizeTextActive: {
+    color: "#38BDF8",
+  },
+  paginationDot: {
+    fontFamily: "Nunito-Bold",
+    fontSize: 13,
+    color: "#475569",
   },
 });

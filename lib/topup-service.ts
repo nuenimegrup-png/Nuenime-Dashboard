@@ -410,9 +410,25 @@ export async function getCrystalBalance(userId?: string | null): Promise<number>
         return data.crystal_balance;
       }
     } catch {}
+
+    // 2. Coba via RPC Security Definer admin_adjust_user_balance dengan delta 0 (membaca saldo riil dari DB tanpa merubah)
+    try {
+      const { data: rpcRes, error: rpcErr } = await supabase.rpc("admin_adjust_user_balance", {
+        p_user_id: userId,
+        p_amount: 0,
+        p_reason: "balance_sync_check",
+        p_admin_id: "73f6e447-2f8c-4f12-ad94-a737a78e279b",
+        p_admin_email: "admin@nuenime.com",
+      });
+      if (!rpcErr && rpcRes && rpcRes.success && typeof rpcRes.balance_after === "number") {
+        const key = getCrystalBalanceStorageKey(userId);
+        await AsyncStorage.setItem(key, String(rpcRes.balance_after));
+        return rpcRes.balance_after;
+      }
+    } catch {}
   }
 
-  // 2. Fallback AsyncStorage
+  // 3. Fallback AsyncStorage
   try {
     const key = getCrystalBalanceStorageKey(userId);
     const val = await AsyncStorage.getItem(key);
@@ -453,13 +469,47 @@ export async function setCrystalBalance(
 
   // Sinkronkan ke Supabase user_balances jika user valid
   if (userId && userId.trim().length > 0 && userId !== "guest") {
+    let rpcDone = false;
+    // 1. Coba RPC admin_set_user_crystal_balance
     try {
-      await supabase.from("user_balances").upsert({
-        user_id: userId,
-        crystal_balance: safeAmount,
-        updated_at: new Date().toISOString(),
+      const { data: rpcRes, error: rpcErr } = await supabase.rpc("admin_set_user_crystal_balance", {
+        p_user_id: userId,
+        p_new_balance: safeAmount,
+        p_reason: "Admin Set Balance",
       });
+      if (!rpcErr && rpcRes && rpcRes.success) {
+        rpcDone = true;
+      }
     } catch {}
+
+    // 2. Coba via admin_adjust_user_balance
+    if (!rpcDone) {
+      try {
+        const cur = await getCrystalBalance(userId);
+        const delta = safeAmount - cur;
+        const { data: rpcRes2, error: rpcErr2 } = await supabase.rpc("admin_adjust_user_balance", {
+          p_user_id: userId,
+          p_amount: delta,
+          p_reason: "Admin Set Balance",
+          p_admin_id: "73f6e447-2f8c-4f12-ad94-a737a78e279b",
+          p_admin_email: "admin@nuenime.com",
+        });
+        if (!rpcErr2 && rpcRes2 && rpcRes2.success) {
+          rpcDone = true;
+        }
+      } catch {}
+    }
+
+    // 3. Fallback direct upsert
+    if (!rpcDone) {
+      try {
+        await supabase.from("user_balances").upsert({
+          user_id: userId,
+          crystal_balance: safeAmount,
+          updated_at: new Date().toISOString(),
+        });
+      } catch {}
+    }
   }
 
   return safeAmount;

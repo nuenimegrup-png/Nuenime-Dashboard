@@ -26,6 +26,7 @@ import {
   NUENIME_USER_ROLES,
   isSpecialRole,
   getAdminUsersList,
+  getCrystalBalance,
   adminAdjustUserBalance,
   adminResetUserCooldown,
   adminUpdateUserRole,
@@ -37,9 +38,63 @@ import {
   adminAddFriendship,
 } from "@/lib/admin-service";
 import { useAnirakuAuth } from "@/providers/auth-provider";
-import { getProfileCooldownStatus, BANNER_COOLDOWN_SECONDS, NAME_COOLDOWN_SECONDS, AVATAR_COOLDOWN_SECONDS } from "@/lib/profile-cooldown";
+import { getProfileCooldownStatus, NAME_COOLDOWN_SECONDS, AVATAR_COOLDOWN_SECONDS } from "@/lib/profile-cooldown";
 
 type UserDetailTab = "role" | "cooldown" | "balance" | "status" | "history" | "friends";
+
+const AVATAR_PALETTE = [
+  "#8C57FF", "#38BDF8", "#10B981", "#F59E0B", "#EC4899",
+  "#6366F1", "#14B8A6", "#F97316", "#06B6D4", "#84CC16"
+];
+
+function UserTableAvatar({
+  avatarUrl,
+  username,
+  displayName,
+}: {
+  avatarUrl?: string | null;
+  username: string;
+  displayName?: string;
+}) {
+  const [imgError, setImgError] = useState(false);
+
+  useEffect(() => {
+    setImgError(false);
+  }, [avatarUrl]);
+
+  const nameForInitial = displayName || username || "User";
+  const letter = (nameForInitial.trim()[0] || "U").toUpperCase();
+
+  let hash = 0;
+  for (let i = 0; i < username.length; i++) {
+    hash = (hash << 5) - hash + username.charCodeAt(i);
+  }
+  const bgColor = AVATAR_PALETTE[Math.abs(hash) % AVATAR_PALETTE.length];
+
+  const isValidUrl =
+    typeof avatarUrl === "string" &&
+    avatarUrl.trim().startsWith("http") &&
+    !avatarUrl.includes("pin.it/") &&
+    !avatarUrl.includes("share.google/");
+
+  if (isValidUrl && !imgError) {
+    return (
+      <View style={[styles.avatarMiniWrap, { backgroundColor: bgColor }]}>
+        <Image
+          source={{ uri: avatarUrl }}
+          style={styles.avatarMini}
+          onError={() => setImgError(true)}
+        />
+      </View>
+    );
+  }
+
+  return (
+    <View style={[styles.avatarMiniWrap, { backgroundColor: bgColor, alignItems: "center", justifyContent: "center" }]}>
+      <Text style={styles.avatarPlaceholderText}>{letter}</Text>
+    </View>
+  );
+}
 
 export default function AdminUsersScreen() {
   const auth = useAnirakuAuth();
@@ -83,7 +138,7 @@ export default function AdminUsersScreen() {
   const [adjusting, setAdjusting] = useState(false);
 
   const [showCooldownModal, setShowCooldownModal] = useState(false);
-  const [cooldownType, setCooldownType] = useState<"name" | "avatar" | "banner" | "all">("all");
+  const [cooldownType, setCooldownType] = useState<"name" | "avatar" | "all">("all");
   const [cooldownReason, setCooldownReason] = useState("");
   const [resettingCooldown, setResettingCooldown] = useState(false);
 
@@ -129,19 +184,21 @@ export default function AdminUsersScreen() {
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const loadUsers = useCallback(async () => {
-    setLoading(true);
+  const loadUsers = useCallback(async (forceRefresh = false) => {
+    if (users.length === 0) setLoading(true);
     try {
-      const list = await getAdminUsersList(searchQuery);
-      setUsers(list);
+      const list = await getAdminUsersList(undefined, { forceRefresh });
+      if (list && list.length > 0) {
+        setUsers(list);
 
-      // Sinkronkan data tab yang sedang terbuka jika ada perubahan
-      setOpenUserTabs((prev) =>
-        prev.map((tab) => list.find((u) => u.id === tab.id) || tab)
-      );
+        // Sinkronkan data tab yang sedang terbuka jika ada perubahan
+        setOpenUserTabs((prev) =>
+          prev.map((tab) => list.find((u) => u.id === tab.id) || tab)
+        );
+      }
     } catch {}
     setLoading(false);
-  }, [searchQuery]);
+  }, [users.length]);
 
   useEffect(() => {
     loadUsers();
@@ -328,7 +385,7 @@ export default function AdminUsersScreen() {
       Alert.alert(
         "Reset Berhasil",
         cooldownType === "all"
-          ? `Seluruh cooldown (Nama, Avatar, Banner) untuk @${activeUser.username} telah dibatalkan & di-reset.`
+          ? `Seluruh cooldown (Nama & Avatar) untuk @${activeUser.username} telah dibatalkan & di-reset.`
           : `Cooldown ${cooldownType.toUpperCase()} untuk @${activeUser.username} telah di-reset.`
       );
       setShowCooldownModal(false);
@@ -341,13 +398,10 @@ export default function AdminUsersScreen() {
         if (cooldownType === "all") {
           updated.nameUpdatedAt = null;
           updated.avatarUpdatedAt = null;
-          updated.bannerUpdatedAt = null;
         } else if (cooldownType === "name") {
           updated.nameUpdatedAt = null;
         } else if (cooldownType === "avatar") {
           updated.avatarUpdatedAt = null;
-        } else if (cooldownType === "banner") {
-          updated.bannerUpdatedAt = null;
         }
         return updated;
       };
@@ -501,10 +555,21 @@ export default function AdminUsersScreen() {
 
   const filteredUsers = useMemo(() => {
     let result = users;
-    if (roleFilter === "special") result = users.filter((u) => isSpecialRole(u.role));
-    else if (roleFilter === "member") result = users.filter((u) => !isSpecialRole(u.role));
-    else if (roleFilter === "banned") result = users.filter((u) => u.isBanned);
-    else if (roleFilter !== "all") result = users.filter((u) => u.role.toLowerCase() === roleFilter.toLowerCase());
+    if (searchQuery.trim().length > 0) {
+      const q = searchQuery.toLowerCase().trim();
+      result = result.filter(
+        (u) =>
+          u.username.toLowerCase().includes(q) ||
+          u.displayName.toLowerCase().includes(q) ||
+          u.email.toLowerCase().includes(q) ||
+          u.role.toLowerCase().includes(q) ||
+          u.memberNumber.toLowerCase().includes(q)
+      );
+    }
+    if (roleFilter === "special") result = result.filter((u) => isSpecialRole(u.role));
+    else if (roleFilter === "member") result = result.filter((u) => !isSpecialRole(u.role));
+    else if (roleFilter === "banned") result = result.filter((u) => u.isBanned);
+    else if (roleFilter !== "all") result = result.filter((u) => u.role.toLowerCase() === roleFilter.toLowerCase());
 
     // Pastikan angka member selalu dari urutan nomor 1 (#0001) dari atas
     return [...result].sort((a, b) => {
@@ -512,7 +577,7 @@ export default function AdminUsersScreen() {
       const numB = parseInt(String(b.memberNumber || "0").replace(/[^0-9]/g, ""), 10) || 0;
       return numA - numB;
     });
-  }, [users, roleFilter]);
+  }, [users, searchQuery, roleFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredUsers.length / pageSize));
 
@@ -526,10 +591,44 @@ export default function AdminUsersScreen() {
     return filteredUsers.slice(start, start + pageSize);
   }, [filteredUsers, currentPage, pageSize]);
 
+  // Sinkronisasi saldo latar belakang secara bertahap khusus untuk pengguna di halaman yang sedang aktif
+  useEffect(() => {
+    if (paginatedUsers.length === 0) return;
+    let isCancelled = false;
+
+    const syncPageBalances = async () => {
+      const updates: { id: string; balance: number }[] = [];
+      await Promise.allSettled(
+        paginatedUsers.map(async (u) => {
+          try {
+            const realBal = await getCrystalBalance(u.id);
+            if (realBal !== u.crystalBalance) {
+              updates.push({ id: u.id, balance: realBal });
+            }
+          } catch {}
+        })
+      );
+
+      if (!isCancelled && updates.length > 0) {
+        setUsers((prev) =>
+          prev.map((u) => {
+            const found = updates.find((up) => up.id === u.id);
+            return found ? { ...u, crystalBalance: found.balance } : u;
+          })
+        );
+      }
+    };
+
+    void syncPageBalances();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [paginatedUsers]);
+
   // Cooldown status calculation for active user
   const nameCooldown = getProfileCooldownStatus(activeUser?.nameUpdatedAt, NAME_COOLDOWN_SECONDS, "name");
   const avatarCooldown = getProfileCooldownStatus(activeUser?.avatarUpdatedAt, AVATAR_COOLDOWN_SECONDS, "avatar");
-  const bannerCooldown = getProfileCooldownStatus(activeUser?.bannerUpdatedAt, BANNER_COOLDOWN_SECONDS, "banner");
 
   return (
     <AdminLayout
@@ -671,7 +770,7 @@ export default function AdminUsersScreen() {
               <Pressable
                 onPress={() => {
                   hapticLight();
-                  loadUsers();
+                  loadUsers(true);
                 }}
                 style={styles.refreshBtn}
               >
@@ -735,7 +834,7 @@ export default function AdminUsersScreen() {
 
           {/* Users Table Card */}
           <View style={styles.cardBox}>
-            {loading ? (
+            {loading && users.length === 0 ? (
               <ActivityIndicator size="small" color="#38BDF8" style={{ padding: 30 }} />
             ) : filteredUsers.length === 0 ? (
               <View style={styles.emptyWrap}>
@@ -768,15 +867,7 @@ export default function AdminUsersScreen() {
 
                           {/* User Info */}
                           <View style={{ flex: 2.5, flexDirection: "row", alignItems: "center", gap: 10 }}>
-                            <View style={styles.avatarMiniWrap}>
-                              {u.avatarUrl ? (
-                                <Image source={{ uri: u.avatarUrl }} style={styles.avatarMini} />
-                              ) : (
-                                <View style={styles.avatarPlaceholder}>
-                                  <Text style={styles.avatarPlaceholderText}>{u.username[0]?.toUpperCase() || "U"}</Text>
-                                </View>
-                              )}
-                            </View>
+                            <UserTableAvatar avatarUrl={u.avatarUrl} username={u.username} displayName={u.displayName} />
                             <View style={{ flex: 1 }}>
                               <Text style={styles.tdBold} numberOfLines={1}>
                                 {u.displayName || u.username}
@@ -867,15 +958,7 @@ export default function AdminUsersScreen() {
 
                               {/* User Info */}
                               <View style={{ width: 220, flexDirection: "row", alignItems: "center", gap: 10, paddingRight: 8 }}>
-                                <View style={styles.avatarMiniWrap}>
-                                  {u.avatarUrl ? (
-                                    <Image source={{ uri: u.avatarUrl }} style={styles.avatarMini} />
-                                  ) : (
-                                    <View style={styles.avatarPlaceholder}>
-                                      <Text style={styles.avatarPlaceholderText}>{u.username[0]?.toUpperCase() || "U"}</Text>
-                                    </View>
-                                  )}
-                                </View>
+                                <UserTableAvatar avatarUrl={u.avatarUrl} username={u.username} displayName={u.displayName} />
                                 <View style={{ flex: 1 }}>
                                   <Text style={styles.tdBold} numberOfLines={1}>
                                     {u.displayName || u.username}
@@ -1476,44 +1559,6 @@ export default function AdminUsersScreen() {
                     <Text style={styles.resetCooldownBtnText}>Reset Cooldown Avatar</Text>
                   </Pressable>
                 </View>
-
-                {/* 3. Banner Profil */}
-                <View style={[styles.cooldownCard, !isWide && styles.cooldownCardMobile]}>
-                  <View style={styles.cooldownCardHeader}>
-                    <View style={styles.cooldownIconBox}>
-                      <AppIcon name="image-outline" size={22} color="#F59E0B" />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.cooldownCardTitle}>Perubahan Banner</Text>
-                      <Text style={styles.cooldownCardRule}>Batas: 1x dalam 7 hari</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.cooldownStatusRow}>
-                    <Text style={styles.cooldownStatusLabel}>Status:</Text>
-                    <Text style={[styles.cooldownStatusVal, { color: bannerCooldown.canChange ? "#10B981" : "#EF4444" }]}>
-                      {bannerCooldown.canChange ? "Tersedia Sekarang" : `Aktif (${bannerCooldown.remainingText})`}
-                    </Text>
-                  </View>
-
-                  <View style={styles.cooldownMetaRow}>
-                    <Text style={styles.cooldownMetaText}>
-                      Update Terakhir: {activeUser.bannerUpdatedAt ? new Date(activeUser.bannerUpdatedAt).toLocaleString("id-ID") : "Belum pernah diubah"}
-                    </Text>
-                  </View>
-
-                  <Pressable
-                    onPress={() => {
-                      hapticLight();
-                      setCooldownType("banner");
-                      setShowCooldownModal(true);
-                    }}
-                    style={styles.resetCooldownBtn}
-                  >
-                    <AppIcon name="restore" size={13} color="#FFFFFF" />
-                    <Text style={styles.resetCooldownBtnText}>Reset Cooldown Banner</Text>
-                  </Pressable>
-                </View>
               </View>
             </View>
           )}
@@ -1846,15 +1891,7 @@ export default function AdminUsersScreen() {
                     const friendUserObj = users.find((u) => u.id === f.friendId);
                     return isWide ? (
                       <View key={f.id} style={styles.friendCard}>
-                        <View style={styles.avatarMiniWrap}>
-                          {f.avatarUrl ? (
-                            <Image source={{ uri: f.avatarUrl }} style={styles.avatarMini} />
-                          ) : (
-                            <View style={styles.avatarPlaceholder}>
-                              <Text style={styles.avatarPlaceholderText}>{f.username[0]?.toUpperCase()}</Text>
-                            </View>
-                          )}
-                        </View>
+                        <UserTableAvatar avatarUrl={f.avatarUrl} username={f.username} displayName={f.displayName} />
                         <View style={{ flex: 1, minWidth: 120 }}>
                           <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                             <Text style={styles.friendNameText} numberOfLines={1}>{f.displayName}</Text>
@@ -1922,15 +1959,7 @@ export default function AdminUsersScreen() {
                       /* ─── Mobile Friend Card: Sempurna & Anti Nembus ─── */
                       <View key={f.id} style={styles.friendCardMobile}>
                         <View style={styles.friendCardMobileTop}>
-                          <View style={styles.avatarMiniWrap}>
-                            {f.avatarUrl ? (
-                              <Image source={{ uri: f.avatarUrl }} style={styles.avatarMini} />
-                            ) : (
-                              <View style={styles.avatarPlaceholder}>
-                                <Text style={styles.avatarPlaceholderText}>{f.username[0]?.toUpperCase()}</Text>
-                              </View>
-                            )}
-                          </View>
+                          <UserTableAvatar avatarUrl={f.avatarUrl} username={f.username} displayName={f.displayName} />
                           <View style={{ flex: 1, minWidth: 0 }}>
                             <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                               <Text style={styles.friendNameText} numberOfLines={1}>{f.displayName}</Text>
@@ -2088,14 +2117,14 @@ export default function AdminUsersScreen() {
             <View style={styles.formGroup}>
               <Text style={styles.fieldLabel}>Pilih Jenis Cooldown yang Ingin Dibatalkan:</Text>
               <View style={styles.cooldownTypeRow}>
-                {(["all", "name", "avatar", "banner"] as const).map((t) => (
+                {(["all", "name", "avatar"] as const).map((t) => (
                   <Pressable
                     key={t}
                     onPress={() => setCooldownType(t)}
                     style={[styles.cooldownTypeChip, cooldownType === t && styles.cooldownTypeChipActive]}
                   >
                     <Text style={[styles.cooldownTypeText, cooldownType === t && styles.cooldownTypeTextActive]}>
-                      {t === "all" ? "Semua Sekaligus" : t === "name" ? "Nama (24h)" : t === "avatar" ? "Avatar (24h)" : "Banner (7d)"}
+                      {t === "all" ? "Semua Sekaligus" : t === "name" ? "Nama (24h)" : "Avatar (24h)"}
                     </Text>
                   </Pressable>
                 ))}

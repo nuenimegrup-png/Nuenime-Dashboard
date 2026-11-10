@@ -42,10 +42,25 @@ const TEST_AVATARS = [
 
 type StatusFilter = "all" | "released" | "pending" | "has_url" | "no_url";
 
+// ─── IN-MEMORY CACHE (0ms Instant Load Tanpa Loading Terus Menerus) ──────────
+let memBordersCache: AvatarBorder[] = [];
+
+if (typeof window !== "undefined" && window.localStorage) {
+  try {
+    const raw = window.localStorage.getItem("nuenime.cached_border_catalog");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        memBordersCache = parsed;
+      }
+    }
+  } catch {}
+}
+
 export default function AdminBordersScreen() {
   const auth = useAnirakuAuth();
-  const [loading, setLoading] = useState(true);
-  const [borders, setBorders] = useState<AvatarBorder[]>([]);
+  const [loading, setLoading] = useState(() => memBordersCache.length === 0);
+  const [borders, setBorders] = useState<AvatarBorder[]>(() => memBordersCache);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedRarity, setSelectedRarity] = useState<BorderRarity | "all">("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -104,8 +119,8 @@ export default function AdminBordersScreen() {
         role: "super_admin",
       };
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async (isBackground = false) => {
+    if (!isBackground && memBordersCache.length === 0) setLoading(true);
     try {
       const list = await getAdminBordersCatalog();
       const seen = new Set<string>();
@@ -115,13 +130,21 @@ export default function AdminBordersScreen() {
         seen.add(b.id);
         uniqueList.push(b);
       }
+      memBordersCache = uniqueList;
       setBorders(uniqueList);
-    } catch {}
-    setLoading(false);
+      if (typeof window !== "undefined" && window.localStorage) {
+        try {
+          window.localStorage.setItem("nuenime.cached_border_catalog", JSON.stringify(uniqueList));
+        } catch {}
+      }
+    } catch {} finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    loadData();
+    const hasCache = memBordersCache.length > 0;
+    void loadData(hasCache);
   }, [loadData]);
 
   // ─── UNIQUE DEDUPLICATED BORDERS (Mencegah Duplikasi Tampilan) ───
@@ -309,6 +332,7 @@ export default function AdminBordersScreen() {
     if (res.success && res.border) {
       hapticSuccess();
       setBorders((prev) => [res.border!, ...prev.filter((b) => b.id !== res.border!.id)]);
+      memBordersCache = [res.border!, ...memBordersCache.filter((b) => b.id !== res.border!.id)];
       setShowAddModal(false);
       showToast(
         `Border "${res.border.name}" (${res.border.rarity}) berhasil disimpan ke database dan aktif di APK!`,
@@ -341,6 +365,7 @@ export default function AdminBordersScreen() {
     if (res.success) {
       hapticSuccess();
       setBorders((prev) => prev.filter((b) => b.id !== target.id));
+      memBordersCache = memBordersCache.filter((b) => b.id !== target.id);
       showToast(res.message, "success");
     } else {
       showToast(res.message || "Gagal menghapus border.", "error");
@@ -382,6 +407,9 @@ export default function AdminBordersScreen() {
       hapticSuccess();
       setBorders((prev) =>
         prev.map((b) => (b.id === editingBorder.id ? { ...result } : b))
+      );
+      memBordersCache = memBordersCache.map((b) =>
+        b.id === editingBorder.id ? { ...result } : b
       );
       setEditingBorder(null);
       showToast(
@@ -637,7 +665,7 @@ export default function AdminBordersScreen() {
       </View>
 
       {/* ─── GRID KARTU BORDER AVATAR ─── */}
-      {loading ? (
+      {loading && borders.length === 0 ? (
         <View style={styles.loadingWrap}>
           <ActivityIndicator size="large" color="#CBD5E1" />
           <Text style={styles.loadingText}>Memuat katalog border avatar...</Text>
@@ -1190,7 +1218,7 @@ export default function AdminBordersScreen() {
                   </Text>
                 </View>
                 <Text style={styles.modalPreviewHint}>
-                  Harga: {newBorderPrice ? parseInt(newBorderPrice).toLocaleString() : BORDER_RARITY_PRICES[newBorderRarity].toLocaleString()} Crystal · {newBorderAssetUrl.trim() ? "Aset Siap" : "Belum Ada URL"}
+                  Harga: {newBorderPrice ? parseInt(newBorderPrice, 10).toLocaleString("id-ID") : BORDER_RARITY_PRICES[newBorderRarity].toLocaleString("id-ID")} Crystal · {newBorderAssetUrl.trim() ? "Aset Siap" : "Belum Ada URL"}
                 </Text>
               </View>
             </View>
@@ -1295,7 +1323,7 @@ export default function AdminBordersScreen() {
             <View style={styles.formGroup}>
               <View style={styles.labelRow}>
                 <Text style={styles.fieldLabel}>
-                  Harga Crystal: <Text style={{ color: "#94A3B8" }}>(Default kategori: {BORDER_RARITY_PRICES[newBorderRarity]})</Text>
+                  Harga Crystal: <Text style={{ color: "#94A3B8" }}>(Default kategori: {BORDER_RARITY_PRICES[newBorderRarity].toLocaleString("id-ID")})</Text>
                 </Text>
                 <Text style={styles.requiredMark}>*Wajib diisi</Text>
               </View>

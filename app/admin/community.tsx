@@ -18,6 +18,7 @@ import { AppIcon } from "@/components/app-icon";
 import { hapticLight, hapticSuccess, hapticWarning } from "@/lib/haptics";
 import { supabase } from "@/lib/supabase";
 import { type AdminUser, logAdminAction } from "@/lib/admin-service";
+import { STORAGE_AUDIT_LOGS } from "@/lib/admin-audit";
 import { useAnirakuAuth } from "@/providers/auth-provider";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
@@ -94,19 +95,47 @@ const DEFAULT_BLACKLIST = [
   "judi", "slot", "gacor", "bokep", "porn", "kontol", "memek", "anjing", "bangsat", "tolol"
 ];
 
+// ─── IN-MEMORY SWR CACHE (0ms Instant Load Tanpa Reload Berulang) ──────────
+let memCommentsCache: AdminComment[] = [];
+let memMessagesCache: AdminPrivateMessage[] = [];
+let memBlacklistCache: string[] = DEFAULT_BLACKLIST;
+let memAuditLogsCache: AuditLogItem[] = [];
+
+if (typeof window !== "undefined" && window.localStorage) {
+  try {
+    const c = window.localStorage.getItem("nuenime.admin.cached_community_comments");
+    if (c) memCommentsCache = JSON.parse(c) || [];
+    const m = window.localStorage.getItem("nuenime.admin.cached_community_messages");
+    if (m) memMessagesCache = JSON.parse(m) || [];
+    const b = window.localStorage.getItem("nuenime.admin.cached_community_blacklist");
+    if (b) memBlacklistCache = JSON.parse(b) || DEFAULT_BLACKLIST;
+    const a = window.localStorage.getItem("nuenime.admin.cached_community_audit");
+    if (a) memAuditLogsCache = JSON.parse(a) || [];
+  } catch {}
+}
+
 export default function AdminCommunityScreen() {
   const auth = useAnirakuAuth();
   const { width } = useWindowDimensions();
   const isWide = width >= 860;
 
   const [activeTab, setActiveTab] = useState<CommunityTab>("comments");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(
+    () => memCommentsCache.length === 0 && memMessagesCache.length === 0
+  );
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // ─── DATA STATE ───
-  const [comments, setComments] = useState<AdminComment[]>([]);
-  const [messages, setMessages] = useState<AdminPrivateMessage[]>([]);
-  const [blacklist, setBlacklist] = useState<string[]>(DEFAULT_BLACKLIST);
-  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
+  // ─── DATA STATE (SWR Initialized) ───
+  const [comments, setComments] = useState<AdminComment[]>(() => memCommentsCache);
+  const [messages, setMessages] = useState<AdminPrivateMessage[]>(() => memMessagesCache);
+  const [blacklist, setBlacklist] = useState<string[]>(() => memBlacklistCache);
+  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>(() => memAuditLogsCache);
+
+  // ─── PAGINATION STATE (Data bertahap agar ringan) ───
+  const [commentPage, setCommentPage] = useState(1);
+  const [auditPage, setAuditPage] = useState(1);
+  const COMMENTS_PER_PAGE = 12;
+  const AUDIT_PER_PAGE = 10;
 
   // ─── WHATSAPP WEB UI STATE ───
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
@@ -174,7 +203,11 @@ export default function AdminCommunityScreen() {
       if (!error && data?.value && Array.isArray(data.value)) {
         const words = (data.value as string[]).map((w) => String(w).trim().toLowerCase()).filter(Boolean);
         setBlacklist(words);
+        memBlacklistCache = words;
         await AsyncStorage.setItem(STORAGE_WORD_BLACKLIST, JSON.stringify(words)).catch(() => {});
+        if (typeof window !== "undefined" && window.localStorage) {
+          try { window.localStorage.setItem("nuenime.admin.cached_community_blacklist", JSON.stringify(words)); } catch {}
+        }
         return words;
       }
     } catch {}
@@ -185,12 +218,14 @@ export default function AdminCommunityScreen() {
         const parsed = JSON.parse(local);
         if (Array.isArray(parsed) && parsed.length > 0) {
           setBlacklist(parsed);
+          memBlacklistCache = parsed;
           return parsed;
         }
       }
     } catch {}
 
     setBlacklist(DEFAULT_BLACKLIST);
+    memBlacklistCache = DEFAULT_BLACKLIST;
     return DEFAULT_BLACKLIST;
   }, []);
 
@@ -205,6 +240,7 @@ export default function AdminCommunityScreen() {
 
       if (error || !rawComments || rawComments.length === 0) {
         setComments([]);
+        memCommentsCache = [];
         return;
       }
 
@@ -238,6 +274,10 @@ export default function AdminCommunityScreen() {
       });
 
       setComments(parsed);
+      memCommentsCache = parsed;
+      if (typeof window !== "undefined" && window.localStorage) {
+        try { window.localStorage.setItem("nuenime.admin.cached_community_comments", JSON.stringify(parsed)); } catch {}
+      }
     } catch {
       setComments([]);
     }
@@ -254,6 +294,7 @@ export default function AdminCommunityScreen() {
 
       if (error || !rawMessages || rawMessages.length === 0) {
         setMessages([]);
+        memMessagesCache = [];
         return;
       }
 
@@ -290,47 +331,85 @@ export default function AdminCommunityScreen() {
       });
 
       setMessages(parsed);
+      memMessagesCache = parsed;
+      if (typeof window !== "undefined" && window.localStorage) {
+        try { window.localStorage.setItem("nuenime.admin.cached_community_messages", JSON.stringify(parsed)); } catch {}
+      }
     } catch {
       setMessages([]);
     }
   }, [detectBannedWords]);
 
-  // ─── 4. LOAD AUDIT LOG MODERASI ───
+  // ─── 4. LOAD AUDIT LOG MODERASI (DATABASE + LOCAL FALLBACK) ───
   const loadAuditLogs = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from("admin_audit_logs")
         .select("*")
-        .or("action.ilike.%COMMENT%,action.ilike.%MESSAGE%,action.ilike.%BLACKLIST%")
+        .or("target_type.eq.comment,target_type.eq.message,target_type.eq.community,target_type.eq.chat,action.ilike.%COMMENT%,action.ilike.%MESSAGE%,action.ilike.%BLACKLIST%,action.ilike.%CHAT%")
         .order("created_at", { ascending: false })
-        .limit(50);
+        .limit(100);
 
-      if (!error && Array.isArray(data)) {
-        setAuditLogs(
-          data.map((d: any) => ({
-            id: d.id,
-            action: d.action,
-            adminEmail: d.admin_email || "Admin",
-            targetId: d.target_id || "-",
-            targetType: d.target_type || "community",
-            details: d.details || {},
-            createdAt: d.created_at || new Date().toISOString(),
-          }))
-        );
+      if (!error && Array.isArray(data) && data.length > 0) {
+        const mapped: AuditLogItem[] = data.map((d: any) => ({
+          id: d.id,
+          action: d.action,
+          adminEmail: d.admin_email || "Admin",
+          targetId: d.target_id || "-",
+          targetType: d.target_type || "community",
+          details: typeof d.details === "string" ? JSON.parse(d.details) : (d.details || {}),
+          createdAt: d.created_at || new Date().toISOString(),
+        }));
+        setAuditLogs(mapped);
+        memAuditLogsCache = mapped;
+        if (typeof window !== "undefined" && window.localStorage) {
+          try { window.localStorage.setItem("nuenime.admin.cached_community_audit", JSON.stringify(mapped)); } catch {}
+        }
+        return;
+      }
+    } catch {}
+
+    // Fallback ambil dari penyimpanan lokal jika database belum ada data
+    try {
+      const local = await AsyncStorage.getItem(STORAGE_AUDIT_LOGS);
+      if (local) {
+        const parsed = JSON.parse(local);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const filtered = parsed.filter(
+            (item: any) =>
+              item.targetType === "comment" ||
+              item.targetType === "message" ||
+              item.targetType === "community" ||
+              (item.action &&
+                (item.action.includes("COMMENT") ||
+                  item.action.includes("MESSAGE") ||
+                  item.action.includes("BLACKLIST") ||
+                  item.action.includes("CHAT")))
+          );
+          setAuditLogs(filtered);
+          memAuditLogsCache = filtered;
+        }
       }
     } catch {}
   }, []);
 
-  // ─── LOAD INITIAL DATA ───
-  const reloadAll = useCallback(async () => {
-    setLoading(true);
+  // ─── LOAD INITIAL DATA (SWR Background Sync) ───
+  const reloadAll = useCallback(async (manual = false) => {
+    if (manual) {
+      setIsRefreshing(true);
+    } else if (memCommentsCache.length === 0 && memMessagesCache.length === 0) {
+      setLoading(true);
+    }
+
     const words = await loadBlacklist();
     await Promise.all([
       loadComments(words),
       loadMessages(words),
       loadAuditLogs(),
     ]);
+
     setLoading(false);
+    setIsRefreshing(false);
   }, [loadBlacklist, loadComments, loadMessages, loadAuditLogs]);
 
   useEffect(() => {
@@ -537,6 +616,24 @@ export default function AdminCommunityScreen() {
     return list;
   }, [comments, commentFilter, searchQuery]);
 
+  // ─── PAGINASI KOMENTAR (12 ITEM PER HALAMAN AGAR RINGAN) ───
+  const totalCommentPages = Math.max(1, Math.ceil(filteredComments.length / COMMENTS_PER_PAGE));
+  const paginatedComments = useMemo(() => {
+    const start = (commentPage - 1) * COMMENTS_PER_PAGE;
+    return filteredComments.slice(start, start + COMMENTS_PER_PAGE);
+  }, [filteredComments, commentPage]);
+
+  useEffect(() => {
+    setCommentPage(1);
+  }, [searchQuery, commentFilter]);
+
+  // ─── PAGINASI AUDIT LOG (10 ITEM PER HALAMAN) ───
+  const totalAuditPages = Math.max(1, Math.ceil(auditLogs.length / AUDIT_PER_PAGE));
+  const paginatedAuditLogs = useMemo(() => {
+    const start = (auditPage - 1) * AUDIT_PER_PAGE;
+    return auditLogs.slice(start, start + AUDIT_PER_PAGE);
+  }, [auditLogs, auditPage]);
+
   // ─── CONVERSATIONS GROUPING (WHATSAPP WEB PAIRING) ───
   const conversations: AdminChatConversation[] = useMemo(() => {
     const map = new Map<string, AdminChatConversation>();
@@ -611,6 +708,85 @@ export default function AdminCommunityScreen() {
   const totalMessagesCount = messages.length;
   const flaggedCommentsCount = comments.filter((c) => c.bannedWordsFound.length > 0).length;
   const flaggedMessagesCount = messages.filter((m) => m.bannedWordsFound.length > 0).length;
+
+  // ─── HELPER: RENDER PAGINATION BAR (BERTAHAP & RINGAN) ───
+  const renderPaginationBar = ({
+    currentPage,
+    totalPages,
+    totalItems,
+    pageSize,
+    itemLabel,
+    onPageChange,
+    isWide: _isWide,
+  }: {
+    currentPage: number;
+    totalPages: number;
+    totalItems: number;
+    pageSize: number;
+    itemLabel: string;
+    onPageChange: (p: number) => void;
+    isWide?: boolean;
+  }) => {
+    if (totalItems <= pageSize) return null;
+
+    return (
+      <View style={[styles.paginationRow, !isWide && styles.paginationRowMobile]}>
+        <Text style={styles.paginationInfo}>
+          Menampilkan {(currentPage - 1) * pageSize + 1} -{" "}
+          {Math.min(currentPage * pageSize, totalItems)} dari {totalItems} {itemLabel}
+          {" "}(Halaman {currentPage} dari {totalPages})
+        </Text>
+
+        <View style={styles.paginationBtns}>
+          <Pressable
+            onPress={() => {
+              hapticLight();
+              onPageChange(Math.max(1, currentPage - 1));
+            }}
+            disabled={currentPage === 1}
+            style={[styles.pageBtn, currentPage === 1 && styles.pageBtnDisabled]}
+          >
+            <AppIcon name="chevron-left" size={15} color={currentPage === 1 ? "#334155" : "#94A3B8"} />
+            <Text style={[styles.pageBtnText, currentPage === 1 && styles.pageBtnTextDisabled]}>Prev</Text>
+          </Pressable>
+
+          {Array.from({ length: totalPages }, (_, i) => i + 1)
+            .filter((p) => p === 1 || p === totalPages || Math.abs(p - currentPage) <= 1)
+            .map((p, idx, arr) => {
+              const prev = arr[idx - 1];
+              return (
+                <React.Fragment key={p}>
+                  {prev && p - prev > 1 && <Text style={styles.paginationDot}>...</Text>}
+                  <Pressable
+                    onPress={() => {
+                      hapticLight();
+                      onPageChange(p);
+                    }}
+                    style={[styles.pageNumberBtn, currentPage === p && styles.pageNumberBtnActive]}
+                  >
+                    <Text style={[styles.pageNumberText, currentPage === p && styles.pageNumberTextActive]}>
+                      {p}
+                    </Text>
+                  </Pressable>
+                </React.Fragment>
+              );
+            })}
+
+          <Pressable
+            onPress={() => {
+              hapticLight();
+              onPageChange(Math.min(totalPages, currentPage + 1));
+            }}
+            disabled={currentPage === totalPages}
+            style={[styles.pageBtn, currentPage === totalPages && styles.pageBtnDisabled]}
+          >
+            <Text style={[styles.pageBtnText, currentPage === totalPages && styles.pageBtnTextDisabled]}>Next</Text>
+            <AppIcon name="chevron-right" size={15} color={currentPage === totalPages ? "#334155" : "#94A3B8"} />
+          </Pressable>
+        </View>
+      </View>
+    );
+  };
 
   return (
     <AdminLayout
@@ -775,12 +951,18 @@ export default function AdminCommunityScreen() {
                   <Pressable
                     onPress={() => {
                       hapticLight();
-                      reloadAll();
+                      reloadAll(true);
                     }}
                     style={styles.refreshBtn}
                   >
-                    <AppIcon name="refresh" size={13} color="#94A3B8" />
-                    <Text style={styles.refreshBtnText}>Muat Ulang</Text>
+                    {isRefreshing ? (
+                      <ActivityIndicator size="small" color="#38BDF8" />
+                    ) : (
+                      <AppIcon name="refresh" size={13} color="#94A3B8" />
+                    )}
+                    <Text style={styles.refreshBtnText}>
+                      {isRefreshing ? "Memuat..." : "Muat Ulang"}
+                    </Text>
                   </Pressable>
                 </View>
 
@@ -847,83 +1029,95 @@ export default function AdminCommunityScreen() {
                   </Text>
                 </View>
               ) : (
-                <View style={styles.commentGrid}>
-                  {filteredComments.map((c) => (
-                    <View
-                      key={c.id}
-                      style={[
-                        styles.commentCard,
-                        c.bannedWordsFound.length > 0 && styles.commentCardFlagged,
-                      ]}
-                    >
-                      <View style={styles.commentTopRow}>
-                        <View style={[styles.authorGroup, !isWide && styles.authorGroupMobile]}>
-                          {c.avatarUrl ? (
-                            <Image source={{ uri: c.avatarUrl }} style={styles.authorAvatar} />
-                          ) : (
-                            <View style={styles.authorAvatarPlaceholder}>
-                              <Text style={styles.authorAvatarChar}>
-                                {c.username.charAt(0).toUpperCase()}
+                <>
+                  <View style={styles.commentGrid}>
+                    {paginatedComments.map((c) => (
+                      <View
+                        key={c.id}
+                        style={[
+                          styles.commentCard,
+                          c.bannedWordsFound.length > 0 && styles.commentCardFlagged,
+                        ]}
+                      >
+                        <View style={styles.commentTopRow}>
+                          <View style={[styles.authorGroup, !isWide && styles.authorGroupMobile]}>
+                            {c.avatarUrl ? (
+                              <Image source={{ uri: c.avatarUrl }} style={styles.authorAvatar} />
+                            ) : (
+                              <View style={styles.authorAvatarPlaceholder}>
+                                <Text style={styles.authorAvatarChar}>
+                                  {c.username.charAt(0).toUpperCase()}
+                                </Text>
+                              </View>
+                            )}
+                            <View style={{ flex: 1, minWidth: 0 }}>
+                              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                <Text style={styles.authorDisplayName} numberOfLines={1}>{c.displayName}</Text>
+                                <Text style={styles.authorUsername} numberOfLines={1}>@{c.username}</Text>
+                              </View>
+                              <Text style={styles.commentMeta} numberOfLines={1}>
+                                Anime #{c.animeId} • Ep {c.episodeNumber ?? 1} •{" "}
+                                {new Date(c.createdAt).toLocaleString("id-ID")}
                               </Text>
                             </View>
-                          )}
-                          <View style={{ flex: 1, minWidth: 0 }}>
-                            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                              <Text style={styles.authorDisplayName} numberOfLines={1}>{c.displayName}</Text>
-                              <Text style={styles.authorUsername} numberOfLines={1}>@{c.username}</Text>
+                          </View>
+
+                          <View style={styles.commentBadgesRow}>
+                            {c.isSpoiler && (
+                              <View style={styles.spoilerBadge}>
+                                <AppIcon name="alert-octagon" size={11} color="#F59E0B" />
+                                <Text style={styles.spoilerBadgeText}>Spoiler</Text>
+                              </View>
+                            )}
+                            <View style={styles.likesBadge}>
+                              <AppIcon name="heart" size={11} color="#F43F5E" />
+                              <Text style={styles.likesBadgeText}>{c.likes}</Text>
                             </View>
-                            <Text style={styles.commentMeta} numberOfLines={1}>
-                              Anime #{c.animeId} • Ep {c.episodeNumber ?? 1} •{" "}
-                              {new Date(c.createdAt).toLocaleString("id-ID")}
-                            </Text>
                           </View>
                         </View>
 
-                        <View style={styles.commentBadgesRow}>
-                          {c.isSpoiler && (
-                            <View style={styles.spoilerBadge}>
-                              <AppIcon name="alert-octagon" size={11} color="#F59E0B" />
-                              <Text style={styles.spoilerBadgeText}>Spoiler</Text>
-                            </View>
-                          )}
-                          <View style={styles.likesBadge}>
-                            <AppIcon name="heart" size={11} color="#F43F5E" />
-                            <Text style={styles.likesBadgeText}>{c.likes}</Text>
-                          </View>
-                        </View>
-                      </View>
-
-                      {/* Warning Pill jika mengandung kata terlarang */}
-                      {c.bannedWordsFound.length > 0 && (
-                        <View style={styles.flaggedWarningBox}>
-                          <AppIcon name="shield-alert" size={13} color="#F43F5E" />
-                          <Text style={styles.flaggedWarningText}>
-                            Terdeteksi kata terlarang:{" "}
-                            <Text style={{ fontFamily: "Nunito-Black", color: "#FDA4AF" }}>
-                              {c.bannedWordsFound.join(", ")}
+                        {/* Warning Pill jika mengandung kata terlarang */}
+                        {c.bannedWordsFound.length > 0 && (
+                          <View style={styles.flaggedWarningBox}>
+                            <AppIcon name="shield-alert" size={13} color="#F43F5E" />
+                            <Text style={styles.flaggedWarningText}>
+                              Terdeteksi kata terlarang:{" "}
+                              <Text style={{ fontFamily: "Nunito-Black", color: "#FDA4AF" }}>
+                                {c.bannedWordsFound.join(", ")}
+                              </Text>
                             </Text>
-                          </Text>
+                          </View>
+                        )}
+
+                        <Text style={styles.commentContent}>{c.content}</Text>
+
+                        <View style={styles.commentFooterRow}>
+                          <Text style={styles.commentIdText}>ID: {c.id.slice(0, 8)}...</Text>
+                          <Pressable
+                            onPress={() => {
+                              hapticLight();
+                              setCommentToDelete(c);
+                            }}
+                            style={[styles.deleteActionBtn, !isWide && styles.deleteActionBtnMobile]}
+                          >
+                            <AppIcon name="trash-can-outline" size={13} color="#F43F5E" />
+                            <Text style={styles.deleteActionBtnText}>Hapus Komentar</Text>
+                          </Pressable>
                         </View>
-                      )}
-
-                      <Text style={styles.commentContent}>{c.content}</Text>
-
-                      <View style={styles.commentFooterRow}>
-                        <Text style={styles.commentIdText}>ID: {c.id.slice(0, 8)}...</Text>
-                        <Pressable
-                          onPress={() => {
-                            hapticLight();
-                            setCommentToDelete(c);
-                          }}
-                          style={[styles.deleteActionBtn, !isWide && styles.deleteActionBtnMobile]}
-                        >
-                          <AppIcon name="trash-can-outline" size={13} color="#F43F5E" />
-                          <Text style={styles.deleteActionBtnText}>Hapus Komentar</Text>
-                        </Pressable>
                       </View>
-                    </View>
-                  ))}
-                </View>
+                    ))}
+                  </View>
+
+                  {renderPaginationBar({
+                    currentPage: commentPage,
+                    totalPages: totalCommentPages,
+                    totalItems: filteredComments.length,
+                    pageSize: COMMENTS_PER_PAGE,
+                    itemLabel: "komentar",
+                    onPageChange: setCommentPage,
+                    isWide,
+                  })}
+                </>
               )}
             </View>
           )}
@@ -1346,48 +1540,60 @@ export default function AdminCommunityScreen() {
                     </Text>
                   </View>
                 ) : (
-                  <View style={styles.auditListWrap}>
-                    {auditLogs.map((log) => (
-                      <View key={log.id} style={[styles.auditRow, !isWide && styles.auditRowMobile]}>
-                        <View style={styles.auditLeftCol}>
-                          <View
-                            style={[
-                              styles.auditActionBadge,
-                              log.action.includes("DELETE")
-                                ? { backgroundColor: "rgba(244, 63, 94, 0.12)" }
-                                : { backgroundColor: "rgba(56, 189, 248, 0.12)" },
-                            ]}
-                          >
-                            <Text
+                  <>
+                    <View style={styles.auditListWrap}>
+                      {paginatedAuditLogs.map((log) => (
+                        <View key={log.id} style={[styles.auditRow, !isWide && styles.auditRowMobile]}>
+                          <View style={styles.auditLeftCol}>
+                            <View
                               style={[
-                                styles.auditActionText,
+                                styles.auditActionBadge,
                                 log.action.includes("DELETE")
-                                  ? { color: "#F43F5E" }
-                                  : { color: "#38BDF8" },
+                                  ? { backgroundColor: "rgba(244, 63, 94, 0.12)" }
+                                  : { backgroundColor: "rgba(56, 189, 248, 0.12)" },
                               ]}
                             >
-                              {log.action}
+                              <Text
+                                style={[
+                                  styles.auditActionText,
+                                  log.action.includes("DELETE")
+                                    ? { color: "#F43F5E" }
+                                    : { color: "#38BDF8" },
+                                ]}
+                              >
+                                {log.action}
+                              </Text>
+                            </View>
+                            <Text style={styles.auditTimeText}>
+                              {new Date(log.createdAt).toLocaleString("id-ID")}
                             </Text>
                           </View>
-                          <Text style={styles.auditTimeText}>
-                            {new Date(log.createdAt).toLocaleString("id-ID")}
-                          </Text>
-                        </View>
 
-                        <View style={[styles.auditRightCol, !isWide && styles.auditRightColMobile]}>
-                          <Text style={styles.auditAdminText} numberOfLines={1}>
-                            Moderator: <Text style={{ color: "#FFFFFF" }}>{log.adminEmail}</Text>
-                          </Text>
-                          <Text style={styles.auditDetailsText}>
-                            Catatan:{" "}
-                            {log.details?.reason ||
-                              log.details?.contentSnippet ||
-                              JSON.stringify(log.details || {})}
-                          </Text>
+                          <View style={[styles.auditRightCol, !isWide && styles.auditRightColMobile]}>
+                            <Text style={styles.auditAdminText} numberOfLines={1}>
+                              Moderator: <Text style={{ color: "#FFFFFF" }}>{log.adminEmail}</Text>
+                            </Text>
+                            <Text style={styles.auditDetailsText}>
+                              Catatan:{" "}
+                              {log.details?.reason ||
+                                log.details?.contentSnippet ||
+                                JSON.stringify(log.details || {})}
+                            </Text>
+                          </View>
                         </View>
-                      </View>
-                    ))}
-                  </View>
+                      ))}
+                    </View>
+
+                    {renderPaginationBar({
+                      currentPage: auditPage,
+                      totalPages: totalAuditPages,
+                      totalItems: auditLogs.length,
+                      pageSize: AUDIT_PER_PAGE,
+                      itemLabel: "log tindakan",
+                      onPageChange: setAuditPage,
+                      isWide,
+                    })}
+                  </>
                 )}
               </View>
             </View>
@@ -2885,5 +3091,87 @@ const styles = StyleSheet.create({
     minHeight: 42,
     justifyContent: "center",
     alignItems: "center",
+  },
+
+  // ─── PAGINATION STYLES (KONSISTEN FINANCE & USERS) ───
+  paginationRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingTop: 16,
+    paddingBottom: 4,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.06)",
+    marginTop: 10,
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  paginationRowMobile: {
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  paginationInfo: {
+    fontSize: 12,
+    color: "#94A3B8",
+    fontWeight: "600",
+  },
+  paginationBtns: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  pageBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: "rgba(255, 255, 255, 0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+  },
+  pageBtnDisabled: {
+    opacity: 0.35,
+  },
+  pageBtnText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#CBD5E1",
+  },
+  pageBtnTextDisabled: {
+    color: "#64748B",
+  },
+  pageNumberBtn: {
+    minWidth: 28,
+    height: 28,
+    borderRadius: 6,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255, 255, 255, 0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+    paddingHorizontal: 6,
+  },
+  pageNumberBtnActive: {
+    backgroundColor: "#38BDF8",
+    borderColor: "#38BDF8",
+  },
+  pageNumberText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#94A3B8",
+  },
+  pageNumberTextActive: {
+    color: "#000000",
+    fontWeight: "800",
+  },
+  paginationDot: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#475569",
+    paddingHorizontal: 2,
+    alignSelf: "center",
   },
 });

@@ -9,6 +9,7 @@ import {
   useWindowDimensions,
   Animated,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
 import { AdminLayout } from "@/components/admin/admin-layout";
 import { AppIcon } from "@/components/app-icon";
@@ -23,10 +24,7 @@ import {
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 function formatRupiahShort(val: number): string {
-  if (val >= 1_000_000_000) return `Rp ${(val / 1_000_000_000).toFixed(1)}M`;
-  if (val >= 1_000_000) return `Rp ${(val / 1_000_000).toFixed(1)}Jt`;
-  if (val >= 1_000) return `Rp ${(val / 1_000).toFixed(0)}K`;
-  return `Rp ${val}`;
+  return `Rp ${Math.round(val || 0).toLocaleString("id-ID")}`;
 }
 
 function getStatusColor(status: string): string {
@@ -259,7 +257,7 @@ interface HourlySlot {
         <View style={styles.liveMetricItem}>
           <Text style={styles.liveMetricLabel}>Crystal Terdistribusi</Text>
           <Text style={[styles.liveMetricVal, { color: "#10B981" }]}>
-            {((kpi?.totalCrystalsPurchased ?? total24hCrystals) / 1000).toFixed(1)}K
+            {(kpi?.totalCrystalsPurchased ?? total24hCrystals).toLocaleString("id-ID")}
           </Text>
         </View>
         {isWide && <View style={styles.liveMetricDivider} />}
@@ -327,32 +325,95 @@ interface HourlySlot {
   );
 }
 
+const STORAGE_DASHBOARD_CACHE = "@nuenime_admin_dashboard_cache_v2";
+
+// ─── IN-MEMORY CACHE (0ms Instant Switch Tanpa Loading Spinner) ───────────
+let memKpi: DashboardKPIData | null = null;
+let memAllTxs: TopUpTransaction[] = [];
+let memRecentTxs: TopUpTransaction[] = [];
+
+// Inisialisasi sinkron dari localStorage pada web agar load pertama langsung 0ms
+if (typeof window !== "undefined" && window.localStorage) {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_DASHBOARD_CACHE);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.kpi && Array.isArray(parsed?.txs)) {
+        memKpi = parsed.kpi;
+        memAllTxs = parsed.txs;
+        memRecentTxs = parsed.txs.slice(0, 8);
+      }
+    }
+  } catch {}
+}
+
 // ─── MAIN SCREEN ─────────────────────────────────────────────────────────
 export default function AdminOverviewScreen() {
-  const [loading, setLoading] = useState(true);
-  const [kpi, setKpi] = useState<DashboardKPIData | null>(null);
-  const [recentTxs, setRecentTxs] = useState<TopUpTransaction[]>([]);
-  const [allTxs, setAllTxs] = useState<TopUpTransaction[]>([]);
+  const [loading, setLoading] = useState(() => !memKpi);
+  const [kpi, setKpi] = useState<DashboardKPIData | null>(() => memKpi);
+  const [recentTxs, setRecentTxs] = useState<TopUpTransaction[]>(() => memRecentTxs);
+  const [allTxs, setAllTxs] = useState<TopUpTransaction[]>(() => memAllTxs);
   const [currentTime, setCurrentTime] = useState(new Date());
   const { width } = useWindowDimensions();
   const isWide = width >= 900;
 
-  const loadData = async () => {
-    setLoading(true);
+  const loadData = async (isBackground = false) => {
+    if (!isBackground && !memKpi) setLoading(true);
     try {
-      const [kpiData, txs] = await Promise.all([
-        getDashboardKPIData(),
-        getAllTransactionsForAdmin(),
-      ]);
+      // 1. Tarik transaksi satu kali saja (tidak duplikat)
+      const txs = await getAllTransactionsForAdmin();
+      // 2. Hitung KPI instan dari transaksi yang sudah ada & count Supabase
+      const kpiData = await getDashboardKPIData(txs);
+
+      // Simpan ke memori global
+      memKpi = kpiData;
+      memAllTxs = txs;
+      memRecentTxs = txs.slice(0, 8);
+
       setKpi(kpiData);
       setAllTxs(txs);
       setRecentTxs(txs.slice(0, 8));
-    } catch {}
-    setLoading(false);
+
+      // Simpan ke cache lokal untuk instan 0ms render di kunjungan berikutnya
+      const payload = JSON.stringify({ kpi: kpiData, txs: txs.slice(0, 50) });
+      await AsyncStorage.setItem(STORAGE_DASHBOARD_CACHE, payload).catch(() => {});
+      if (typeof window !== "undefined" && window.localStorage) {
+        try {
+          window.localStorage.setItem(STORAGE_DASHBOARD_CACHE, payload);
+        } catch {}
+      }
+    } catch (err) {
+      console.warn("[AdminOverview] Gagal memuat data:", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    loadData();
+    // 0ms Stale-While-Revalidate: Jika sudah ada cache, jangan blokir UI sama sekali
+    const hasCache = !!memKpi;
+    if (!hasCache) {
+      AsyncStorage.getItem(STORAGE_DASHBOARD_CACHE).then((raw) => {
+        if (raw) {
+          try {
+            const cached = JSON.parse(raw);
+            if (cached?.kpi && Array.isArray(cached?.txs)) {
+              memKpi = cached.kpi;
+              memAllTxs = cached.txs;
+              memRecentTxs = cached.txs.slice(0, 8);
+              setKpi(cached.kpi);
+              setAllTxs(cached.txs);
+              setRecentTxs(cached.txs.slice(0, 8));
+              setLoading(false);
+            }
+          } catch {}
+        }
+        void loadData(hasCache);
+      });
+    } else {
+      void loadData(true);
+    }
+
     const clock = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(clock);
   }, []);
@@ -418,7 +479,7 @@ export default function AdminOverviewScreen() {
     { label: "Maintenance", status: "off", color: "#94A3B8", icon: "wrench-outline" },
   ];
 
-  if (loading) {
+  if (loading && !kpi) {
     return (
       <AdminLayout title="Dashboard" subtitle="Memuat data sistem...">
         <View style={styles.loadingWrap}>
@@ -633,7 +694,7 @@ export default function AdminOverviewScreen() {
                 <Text style={styles.crystalLabel}>Total Dibeli</Text>
                 <ProgressBar value={kpi?.totalCrystalsPurchased ?? 0} max={Math.max(kpi?.totalCrystalsPurchased ?? 1, 1)} color="#CBD5E1" />
               </View>
-              <Text style={[styles.crystalValue, { color: "#CBD5E1" }]}>{((kpi?.totalCrystalsPurchased ?? 0) / 1000).toFixed(1)}K</Text>
+              <Text style={[styles.crystalValue, { color: "#CBD5E1" }]}>{(kpi?.totalCrystalsPurchased ?? 0).toLocaleString("id-ID")}</Text>
             </View>
 
             <View style={styles.crystalStatRow}>
@@ -642,7 +703,7 @@ export default function AdminOverviewScreen() {
                 <Text style={styles.crystalLabel}>Digunakan (est.)</Text>
                 <ProgressBar value={kpi?.totalCrystalsSpent ?? 0} max={kpi?.totalCrystalsPurchased ?? 1} color="#EC4899" />
               </View>
-              <Text style={[styles.crystalValue, { color: "#EC4899" }]}>{((kpi?.totalCrystalsSpent ?? 0) / 1000).toFixed(1)}K</Text>
+              <Text style={[styles.crystalValue, { color: "#EC4899" }]}>{(kpi?.totalCrystalsSpent ?? 0).toLocaleString("id-ID")}</Text>
             </View>
 
             <View style={styles.crystalStatRow}>
@@ -651,7 +712,7 @@ export default function AdminOverviewScreen() {
                 <Text style={styles.crystalLabel}>Tersisa (est.)</Text>
                 <ProgressBar value={(kpi?.totalCrystalsPurchased ?? 0) - (kpi?.totalCrystalsSpent ?? 0)} max={kpi?.totalCrystalsPurchased ?? 1} color="#10B981" />
               </View>
-              <Text style={[styles.crystalValue, { color: "#10B981" }]}>{(((kpi?.totalCrystalsPurchased ?? 0) - (kpi?.totalCrystalsSpent ?? 0)) / 1000).toFixed(1)}K</Text>
+              <Text style={[styles.crystalValue, { color: "#10B981" }]}>{((kpi?.totalCrystalsPurchased ?? 0) - (kpi?.totalCrystalsSpent ?? 0)).toLocaleString("id-ID")}</Text>
             </View>
 
             <View style={[styles.crystalHighlight]}>
@@ -849,7 +910,7 @@ export default function AdminOverviewScreen() {
               {[
                 { label: "Total Transaksi Berhasil", value: `${kpi?.totalCompletedTxs ?? 0}`, icon: "check-circle-outline", color: "#10B981" },
                 { label: "Total Pendapatan Minggu", value: formatRupiahShort(kpi?.revenueThisWeek ?? 0), icon: "chart-line-variant", color: "#CBD5E1" },
-                { label: "Crystal Terdistribusi", value: `${((kpi?.totalCrystalsPurchased ?? 0) / 1000).toFixed(1)}K`, icon: "crystal-ball", color: "#EC4899" },
+                { label: "Crystal Terdistribusi", value: (kpi?.totalCrystalsPurchased ?? 0).toLocaleString("id-ID"), icon: "crystal-ball", color: "#EC4899" },
                 { label: "User Terdaftar", value: `${kpi?.totalRegisteredUsers ?? 0}`, icon: "account-group", color: "#38BDF8" },
               ].map((m) => (
                 <View key={m.label} style={styles.highlightRow}>

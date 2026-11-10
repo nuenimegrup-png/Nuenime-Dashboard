@@ -60,17 +60,23 @@ interface SimResultItem {
   image?: string;
 }
 
+// ─── IN-MEMORY GLOBAL CACHE UNTUK INSTANT ZERO-DELAY SWITCHING (0ms) ───
+let memGachaConfigCache: DynamicGachaConfig | null = null;
+let memBannersCache: WallpaperItem[] | null = null;
+let memAvailableBordersCache: AvatarBorder[] | null = null;
+let memAdminGiftsCache: SystemGift[] | null = null;
+
 export default function AdminGachaScreen() {
   const auth = useAnirakuAuth();
   const [activeTab, setActiveTab] = useState<ActiveTab>("banners");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(memBannersCache === null);
 
   // ─── GACHA CONFIG STATE ───
-  const [gachaConfig, setGachaConfig] = useState<DynamicGachaConfig | null>(null);
+  const [gachaConfig, setGachaConfig] = useState<DynamicGachaConfig | null>(memGachaConfigCache);
   const [savingConfig, setSavingConfig] = useState(false);
 
   // ─── BANNERS LIST STATE (DEDUPLICATED) ───
-  const [banners, setBanners] = useState<WallpaperItem[]>([]);
+  const [banners, setBanners] = useState<WallpaperItem[]>(memBannersCache || []);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedRarityFilter, setSelectedRarityFilter] = useState<string>("ALL");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -113,17 +119,16 @@ export default function AdminGachaScreen() {
   });
 
   // ─── MAILBOX MASS GIFT STATE ───
-  const [giftTitle, setGiftTitle] = useState("");
-  const [giftMessage, setGiftMessage] = useState("");
+  const [giftTitle, setGiftTitle] = useState("Donasi Dylan Crystal");
+  const [giftMessage, setGiftMessage] = useState("Terima kasih telah setia di Nuenime. Nikmati bonus donasi Dylan Crystal ini untuk gacha dan fitur premium!");
   const [giftType, setGiftType] = useState<"crystal" | "border">("crystal");
   const [giftValue, setGiftValue] = useState("100");
-  const [showGiftConfirm, setShowGiftConfirm] = useState(false);
   const [sendingGift, setSendingGift] = useState(false);
-  const [adminGifts, setAdminGifts] = useState<SystemGift[]>([]);
-  const [loadingGifts, setLoadingGifts] = useState(false);
+  const [adminGifts, setAdminGifts] = useState<SystemGift[]>(memAdminGiftsCache || []);
+  const [loadingGifts, setLoadingGifts] = useState(memAdminGiftsCache === null);
   const [giftToDelete, setGiftToDelete] = useState<SystemGift | null>(null);
   const [deletingGift, setDeletingGift] = useState(false);
-  const [availableBorders, setAvailableBorders] = useState<AvatarBorder[]>([]);
+  const [availableBorders, setAvailableBorders] = useState<AvatarBorder[]>(memAvailableBordersCache || []);
   const [showBorderDropdown, setShowBorderDropdown] = useState(false);
 
   const { width } = useWindowDimensions();
@@ -147,11 +152,12 @@ export default function AdminGachaScreen() {
         role: "super_admin",
       };
 
-  // ─── LOAD DATA (DEDUPLICATED) ───
-  const loadAdminGifts = async () => {
-    setLoadingGifts(true);
+  // ─── LOAD DATA (DEDUPLICATED & ZERO DELAY SWR) ───
+  const loadAdminGifts = async (isManual = false) => {
+    if (isManual || !memAdminGiftsCache) setLoadingGifts(true);
     try {
       const list = await getAllAdminGifts();
+      memAdminGiftsCache = list;
       setAdminGifts(list);
     } catch (err) {
       console.warn("[AdminGacha] Error loading gifts:", err);
@@ -160,16 +166,20 @@ export default function AdminGachaScreen() {
     }
   };
 
-  const loadData = async () => {
-    setLoading(true);
+  const loadData = async (isManual = false) => {
+    if (isManual || !memBannersCache) setLoading(true);
     try {
       const [cfg, bList, bCatalog] = await Promise.all([
         getGachaConfig(),
         getAllGachaBanners(),
         fetchLiveBorderCatalog().catch(() => []),
       ]);
+      memGachaConfigCache = cfg;
       setGachaConfig(cfg);
-      if (Array.isArray(bCatalog)) setAvailableBorders(bCatalog);
+      if (Array.isArray(bCatalog)) {
+        memAvailableBordersCache = bCatalog;
+        setAvailableBorders(bCatalog);
+      }
 
       const seen = new Set<string>();
       const uniqueList: WallpaperItem[] = [];
@@ -178,8 +188,9 @@ export default function AdminGachaScreen() {
         seen.add(b.id);
         uniqueList.push(b);
       }
+      memBannersCache = uniqueList;
       setBanners(uniqueList);
-      void loadAdminGifts();
+      void loadAdminGifts(isManual);
     } catch (err) {
       console.warn("[AdminGacha] Error loading data:", err);
     }
@@ -387,6 +398,7 @@ export default function AdminGachaScreen() {
           return;
         }
         setBanners((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
+        memBannersCache = (memBannersCache || []).map((b) => (b.id === updated.id ? updated : b));
         hapticSuccess();
         setShowBannerModal(false);
         showToast(`Banner "${updated.name}" berhasil diperbarui!`, "success");
@@ -410,6 +422,7 @@ export default function AdminGachaScreen() {
           return;
         }
         setBanners((prev) => [res.data!, ...prev.filter((b) => b.id !== res.data!.id)]);
+        memBannersCache = [res.data!, ...(memBannersCache || []).filter((b) => b.id !== res.data!.id)];
         hapticSuccess();
         setShowBannerModal(false);
         showToast(`Banner baru "${res.data.name}" (${res.data.rarity}) berhasil ditambahkan ke pool!`, "success");
@@ -427,6 +440,7 @@ export default function AdminGachaScreen() {
     const nextState = !b.isActive;
     hapticLight();
     setBanners((prev) => prev.map((item) => (item.id === b.id ? { ...item, isActive: nextState } : item)));
+    memBannersCache = (memBannersCache || []).map((item) => (item.id === b.id ? { ...item, isActive: nextState } : item));
     await toggleGachaBannerActive(b.id, nextState, adminUser);
     showToast(`Status banner "${b.name}" diubah menjadi ${nextState ? "Aktif di Pool" : "Nonaktif"}.`);
   };
@@ -445,6 +459,7 @@ export default function AdminGachaScreen() {
       }
 
       setBanners((prev) => prev.filter((b) => b.id !== bannerToDelete.id));
+      memBannersCache = (memBannersCache || []).filter((b) => b.id !== bannerToDelete.id);
       hapticSuccess();
       const refundInfo = res.refundedUsersCount && res.refundedUsersCount > 0
         ? ` Kompensasi refund crystal telah dikirim ke Mailbox ${res.refundedUsersCount} pengguna!`
@@ -542,13 +557,17 @@ export default function AdminGachaScreen() {
         return;
       }
 
+      if (res.data) {
+        setAdminGifts((prev) => [res.data!, ...prev.filter((g) => g.id !== res.data!.id)]);
+        memAdminGiftsCache = [res.data!, ...(memAdminGiftsCache || []).filter((g) => g.id !== res.data!.id)];
+      }
+
       setSendingGift(false);
-      setShowGiftConfirm(false);
       setGiftTitle("");
       setGiftMessage("");
       hapticSuccess();
       showToast(`Hadiah massal "${giftTitle}" berhasil disiarkan ke seluruh pemain!`, "success");
-      void loadAdminGifts();
+      await loadAdminGifts(true);
     } catch (err: any) {
       setSendingGift(false);
       showToast(err?.message || "Terjadi kesalahan sistem.", "error");
@@ -698,7 +717,7 @@ export default function AdminGachaScreen() {
         ))}
       </View>
 
-      {loading ? (
+      {loading && banners.length === 0 ? (
         <View style={styles.loadingWrap}>
           <ActivityIndicator size="large" color="#CBD5E1" />
           <Text style={styles.loadingText}>Memuat data gacha dari database Supabase...</Text>
@@ -1325,7 +1344,7 @@ export default function AdminGachaScreen() {
                   <TextInput
                     value={giftTitle}
                     onChangeText={setGiftTitle}
-                    placeholder="Contoh: Kompensasi Maintenance Server v2.4"
+                    placeholder={giftType === "crystal" ? "Contoh: Donasi Dylan Crystal" : "Contoh: Hadiah Border Avatar Eksklusif"}
                     placeholderTextColor="#64748B"
                     style={styles.fieldInput}
                   />
@@ -1336,7 +1355,11 @@ export default function AdminGachaScreen() {
                   <TextInput
                     value={giftMessage}
                     onChangeText={setGiftMessage}
-                    placeholder="Terima kasih atas kesabaran Anda. Nikmati bonus Crystal ini!"
+                    placeholder={
+                      giftType === "crystal"
+                        ? "Terima kasih telah setia di Nuenime. Nikmati bonus donasi Dylan Crystal ini!"
+                        : "Selamat! Anda mendapatkan hadiah Border Avatar eksklusif..."
+                    }
                     placeholderTextColor="#64748B"
                     style={[styles.fieldInput, { minHeight: 70, textAlignVertical: "top" }]}
                     multiline
@@ -1348,7 +1371,18 @@ export default function AdminGachaScreen() {
                     <Text style={styles.fieldLabel}>Jenis Hadiah:</Text>
                     <View style={[styles.giftTypeRow, !isWide && styles.giftTypeRowMobile]}>
                       <Pressable
-                        onPress={() => setGiftType("crystal")}
+                        onPress={() => {
+                          setGiftType("crystal");
+                          if (!giftTitle || giftTitle.toLowerCase().includes("border")) {
+                            setGiftTitle("Donasi Dylan Crystal");
+                          }
+                          if (!giftMessage || giftMessage.toLowerCase().includes("border")) {
+                            setGiftMessage("Terima kasih telah setia di Nuenime. Nikmati bonus donasi Dylan Crystal ini untuk gacha dan fitur premium!");
+                          }
+                          if (!giftValue || isNaN(Number(giftValue))) {
+                            setGiftValue("100");
+                          }
+                        }}
                         style={[
                           styles.giftTypeBtn,
                           !isWide && styles.giftTypeBtnMobile,
@@ -1364,11 +1398,15 @@ export default function AdminGachaScreen() {
                       <Pressable
                         onPress={() => {
                           setGiftType("border");
-                          if (availableBorders.length > 0 && (!giftValue || giftValue === "100")) {
-                            const first = availableBorders[0];
+                          if (availableBorders.length > 0) {
+                            const first = availableBorders.find((b) => b.id === giftValue) || availableBorders[0];
                             setGiftValue(first.id);
-                            if (!giftTitle) setGiftTitle(`Hadiah Border: ${first.name}`);
-                            if (!giftMessage) setGiftMessage(`Selamat! Anda mendapatkan hadiah Border Avatar eksklusif "${first.name}" (${first.rarity}). Buka profil untuk memakainya!`);
+                            if (!giftTitle || giftTitle.toLowerCase().includes("crystal") || giftTitle.toLowerCase().includes("donasi")) {
+                              setGiftTitle(`Hadiah Border: ${first.name}`);
+                            }
+                            if (!giftMessage || giftMessage.toLowerCase().includes("crystal") || giftMessage.toLowerCase().includes("bonus donasi")) {
+                              setGiftMessage(`Selamat! Anda mendapatkan hadiah Border Avatar eksklusif "${first.name}" (${first.rarity}). Buka profil untuk memakainya!`);
+                            }
                           }
                         }}
                         style={[
@@ -1485,7 +1523,7 @@ export default function AdminGachaScreen() {
 
                 <Pressable
                   disabled={sendingGift}
-                  onPress={() => setShowGiftConfirm(true)}
+                  onPress={handleSendMassGift}
                   style={({ pressed }) => [
                     styles.broadcastBtn,
                     !isWide && styles.broadcastBtnMobile,
@@ -1493,9 +1531,13 @@ export default function AdminGachaScreen() {
                     pressed && styles.btnPressed,
                   ]}
                 >
-                  <AppIcon name="send" size={15} color="#FFFFFF" />
+                  {sendingGift ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <AppIcon name="send" size={15} color="#FFFFFF" />
+                  )}
                   <Text style={styles.broadcastBtnText}>
-                    {sendingGift ? "Mengirim Hadiah..." : "Siarkan Hadiah ke Seluruh Pemain"}
+                    {sendingGift ? "Menyiarkan Hadiah..." : "Siarkan Hadiah ke Seluruh Pemain"}
                   </Text>
                 </Pressable>
               </View>
@@ -1515,7 +1557,7 @@ export default function AdminGachaScreen() {
                     </View>
                   </View>
                   <Pressable
-                    onPress={loadAdminGifts}
+                    onPress={() => loadAdminGifts(true)}
                     style={[styles.refreshGiftsBtn, !isWide && styles.refreshGiftsBtnMobile]}
                   >
                     <AppIcon name="refresh" size={13} color="#94A3B8" />
@@ -1523,7 +1565,7 @@ export default function AdminGachaScreen() {
                   </Pressable>
                 </View>
 
-                {loadingGifts ? (
+                {loadingGifts && adminGifts.length === 0 ? (
                   <View style={{ padding: 24, alignItems: "center" }}>
                     <ActivityIndicator size="small" color="#38BDF8" />
                   </View>
@@ -1570,7 +1612,7 @@ export default function AdminGachaScreen() {
                               </Text>
                               <Text style={{ color: "#64748B" }}>•</Text>
                               <Text style={styles.giftHistoryValue}>
-                                {gift.giftType === "crystal" ? `💎 +${gift.giftValue} Crystal` : `🎨 Border ID: ${gift.giftValue}`}
+                                {gift.giftType === "crystal" ? `💎 +${Number(gift.giftValue || 0).toLocaleString("id-ID")} Crystal` : `🎨 Border ID: ${gift.giftValue}`}
                               </Text>
                             </View>
                           </View>
@@ -1749,7 +1791,7 @@ export default function AdminGachaScreen() {
                           ]}
                         >
                           <Text style={[styles.raritySelectText, isSel && { color: meta.color, fontFamily: "Nunito-Black" }]}>
-                            {r} ({meta.price} 💎)
+                            {r} ({(meta.price || 0).toLocaleString("id-ID")} 💎)
                           </Text>
                         </Pressable>
                       );
@@ -1855,41 +1897,6 @@ export default function AdminGachaScreen() {
         </View>
       </Modal>
 
-      {/* ─── MODAL CONFIRM MASS GIFT ─── */}
-      <Modal visible={showGiftConfirm} transparent animationType="fade">
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Konfirmasi Kirim Hadiah Massal</Text>
-            <Text style={styles.modalHeaderSub}>
-              Hadiah ini akan disiarkan ke kotak surat seluruh pengguna terdaftar di APK Nuenime.
-            </Text>
-            <View style={styles.giftConfirmDetailBox}>
-              <Text style={styles.giftConfirmDetailLabel}>Judul: <Text style={{ color: "#FFFFFF" }}>{giftTitle}</Text></Text>
-              <Text style={styles.giftConfirmDetailLabel}>
-                Isi: <Text style={{ color: "#38BDF8" }}>
-                  {giftType === "crystal"
-                    ? `+${giftValue} Dylan Crystal`
-                    : `Border Avatar: "${availableBorders.find((b) => b.id === giftValue)?.name || giftValue}" (${giftValue})`}
-                </Text>
-              </Text>
-            </View>
-            <View style={styles.modalActionRow}>
-              <Pressable
-                onPress={() => setShowGiftConfirm(false)}
-                style={styles.modalCancelBtn}
-              >
-                <Text style={styles.modalCancelText}>Batal</Text>
-              </Pressable>
-              <Pressable
-                onPress={handleSendMassGift}
-                style={styles.modalSaveBtn}
-              >
-                <Text style={styles.modalSaveText}>Konfirmasi & Siarkan</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
 
       {/* ─── MODAL KONFIRMASI HAPUS HADIAH MASSAL ─── */}
       <Modal visible={giftToDelete !== null} transparent animationType="fade">
@@ -1909,7 +1916,7 @@ export default function AdminGachaScreen() {
               <View style={styles.deletePreviewMeta}>
                 <Text style={styles.deletePreviewName}>{giftToDelete?.title}</Text>
                 <Text style={styles.deletePreviewId}>
-                  Isi: {giftToDelete?.giftType === "crystal" ? `+${giftToDelete?.giftValue} Dylan Crystal` : `Border ID: ${giftToDelete?.giftValue}`}
+                  Isi: {giftToDelete?.giftType === "crystal" ? `+${Number(giftToDelete?.giftValue || 0).toLocaleString("id-ID")} Dylan Crystal` : `Border ID: ${giftToDelete?.giftValue}`}
                 </Text>
                 <Text style={[styles.deletePreviewWarning, { color: "#F43F5E" }]}>
                   ⚠️ Hadiah akan dihapus dari sistem. Pengguna baru atau pemain yang belum klaim tidak akan lagi menerima notifikasi atau hadiah ini.

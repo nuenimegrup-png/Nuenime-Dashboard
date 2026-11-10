@@ -74,11 +74,19 @@ const MENU_ITEMS: MenuItemDef[] = [
   },
   // ─── INVENTORY & BORDERS ───
   {
+    key: "lelang",
+    label: "Lelang & Bidding",
+    icon: "gavel",
+    route: "/admin/lelang",
+    section: "GAMEPLAY & ASET",
+    badge: "LIVE",
+    badgeColor: "#EF4444",
+  },
+  {
     key: "borders",
     label: "Inventory & Border",
     icon: "shield-star",
     route: "/admin/borders",
-    section: "GAMEPLAY & ASET",
   },
   {
     key: "gacha",
@@ -100,11 +108,11 @@ const MENU_ITEMS: MenuItemDef[] = [
     route: "/admin/community",
     section: "KOMUNITAS",
   },
-  // ─── CMS ───
+  // ─── CMS / LAPORAN RUSAK ───
   {
     key: "cms",
-    label: "Anime CMS & Stream",
-    icon: "movie-open-outline",
+    label: "Laporan Rusak",
+    icon: "alert-circle-outline",
     route: "/admin/cms",
     section: "KONTEN",
   },
@@ -268,7 +276,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
     { title: "Gacha Banner & Hadiah Mailbox", desc: "Atur rate banner & hadiah massal user", route: "/admin/gacha", icon: "crystal-ball" },
     { title: "Gamifikasi & Leaderboard Top 50", desc: "Aturan EXP nonton & peringkat pengguna", route: "/admin/gamification", icon: "trophy-outline" },
     { title: "Moderasi Komunitas & Komentar", desc: "Filter kata terlarang & sensor feed anime", route: "/admin/community", icon: "comment-text-multiple" },
-    { title: "Konten Anime & Spotlight Banner", desc: "Kurasi anime unggulan & episode update", route: "/admin/cms", icon: "movie-open-outline" },
+    { title: "Laporan Video & Stream Rusak", desc: "Pantau laporan kendala video & buffering penonton", route: "/admin/cms", icon: "alert-circle-outline" },
     { title: "Sistem, Maintenance & Update APK", desc: "Auto-sync GitHub release & pesan siaran", route: "/admin/system", icon: "android" },
     { title: "Bantuan CS & Integrasi Saweria", desc: "Kelola tiket bantuan pengguna & donasi", route: "/admin/support", icon: "headset" },
     { title: "Team Developer & Kontributor", desc: "Daftar staf teknis pengembang Nuenime", route: "/admin/developers", icon: "account-group" },

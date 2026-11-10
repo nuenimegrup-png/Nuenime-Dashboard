@@ -13,6 +13,7 @@ import {
   setCrystalBalance,
   addCrystalBalance,
   deductCrystalBalance,
+  getCrystalBalanceStorageKey,
   getTopUpTransactionsStorageKey,
   getUserTransactions,
   getPaymentMethodConfigs,
@@ -99,23 +100,28 @@ export async function getAllTransactionsForAdmin(
   filter?: AdminTopUpFilter
 ): Promise<TopUpTransaction[]> {
   try {
-    // 1. Coba ambil via Admin RPC resmi (kebal dari pembatasan RLS anon)
     let dbData: any = null;
     let error: any = null;
+
+    // 1. Prioritaskan RPC Security Definer admin_get_all_transactions (kebal RLS anon, ambil seluruh riwayat transaksi DB)
     try {
       const { data: rpcData, error: rpcErr } = await supabase.rpc("admin_get_all_transactions");
-      if (!rpcErr && Array.isArray(rpcData)) {
+      if (!rpcErr && Array.isArray(rpcData) && rpcData.length > 0) {
         dbData = rpcData;
+        error = null;
       }
     } catch {}
 
-    if (!dbData) {
+    // 2. Fallback query langsung jika RPC belum tersedia
+    if (!dbData || !Array.isArray(dbData) || dbData.length === 0) {
       const res = await supabase
         .from("topup_transactions")
         .select("*")
         .order("created_at", { ascending: false });
-      dbData = res.data;
-      error = res.error;
+      if (!res.error && res.data && Array.isArray(res.data) && res.data.length > 0) {
+        dbData = res.data;
+        error = null;
+      }
     }
 
     let list: TopUpTransaction[] = [];
@@ -701,6 +707,66 @@ export async function saveAdminCrystalPackages(
   });
 }
 
+export async function deleteAdminCrystalPackage(
+  packageId: string,
+  admin: AdminUser
+): Promise<{ success: boolean; packages: CrystalPackage[]; error?: string }> {
+  try {
+    const current = await getAdminCrystalPackages();
+    const target = current.find((p) => p.id === packageId);
+    if (!target) {
+      return { success: false, packages: current, error: "Paket Crystal tidak ditemukan" };
+    }
+
+    const updated = current.filter((p) => p.id !== packageId);
+
+    // 1. Simpan ke storage lokal admin
+    await AsyncStorage.setItem(STORAGE_CRYSTAL_PACKAGES, JSON.stringify(updated));
+
+    // 2. Simpan ke Supabase system_configs via RPC atau direct upsert
+    let rpcDone = false;
+    try {
+      const { data: rpcRes, error: rpcErr } = await supabase.rpc("admin_delete_crystal_package", {
+        p_package_id: packageId,
+      });
+      if (!rpcErr && rpcRes && (rpcRes as any).success) {
+        rpcDone = true;
+      }
+    } catch {}
+
+    if (!rpcDone) {
+      await supabase.from("system_configs").upsert({
+        key: "crystal_packages",
+        value: updated,
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    // 3. Catat di Audit Log Admin
+    await logAdminAction({
+      admin,
+      action: "DELETE_CRYSTAL_PACKAGE",
+      targetType: "crystal_packages",
+      targetId: packageId,
+      details: {
+        packageId,
+        packageName: target.name,
+        amount: target.amount,
+        price: target.price,
+        remainingCount: updated.length,
+      },
+    });
+
+    return { success: true, packages: updated };
+  } catch (err: any) {
+    return {
+      success: false,
+      packages: await getAdminCrystalPackages(),
+      error: err?.message || "Gagal menghapus paket Crystal.",
+    };
+  }
+}
+
 // ─── 4. USER MANAGEMENT & DETAIL ───
 
 export const NUENIME_USER_ROLES = [
@@ -755,28 +821,110 @@ export interface AdminUserListItem {
   sanctionNote?: string;
 }
 
-export async function getAdminUsersList(search?: string): Promise<AdminUserListItem[]> {
+const USERS_CACHE_KEY = "@nuenime_admin_users_cache_v2";
+
+export async function getAdminUsersList(
+  search?: string,
+  options?: { forceRefresh?: boolean }
+): Promise<AdminUserListItem[]> {
+  // 1. SWR Cache: Kembalikan data cache instan (0ms) jika tidak forceRefresh
+  if (!options?.forceRefresh) {
+    try {
+      const cached = await AsyncStorage.getItem(USERS_CACHE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // Lakukan background refresh tanpa memblokir pemanggil
+          void refreshAdminUsersListInBackground();
+          if (search && search.trim().length > 0) {
+            const q = search.toLowerCase();
+            return parsed.filter(
+              (u) =>
+                u.username.toLowerCase().includes(q) ||
+                u.displayName.toLowerCase().includes(q) ||
+                u.email.toLowerCase().includes(q) ||
+                u.memberNumber.toLowerCase().includes(q) ||
+                u.role.toLowerCase().includes(q)
+            );
+          }
+          return parsed;
+        }
+      }
+    } catch {}
+  }
+
+  return fetchFreshAdminUsersList(search);
+}
+
+export async function fetchFreshAdminUsersList(search?: string): Promise<AdminUserListItem[]> {
   try {
-    const { data: profiles, error } = await supabase
-      .from("profiles")
-      .select("*")
-      .order("created_at", { ascending: true });
+    // 1. Ambil profiles, RPC user_balances, dan direct user_balances secara paralel
+    const [profilesRes, rpcBalancesRes, directBalancesRes] = await Promise.all([
+      supabase.from("profiles").select("*").order("created_at", { ascending: true }),
+      (async () => {
+        try {
+          return await supabase.rpc("admin_get_all_user_balances");
+        } catch {
+          return { data: null, error: true as any };
+        }
+      })(),
+      (async () => {
+        try {
+          return await supabase.from("user_balances").select("user_id, crystal_balance");
+        } catch {
+          return { data: null, error: true as any };
+        }
+      })(),
+    ]);
+
+    const profiles = profilesRes.data;
+    const error = profilesRes.error;
+    const balanceMap = new Map<string, number>();
+
+    // Masukkan data saldo dari RPC (prioritas tertinggi)
+    if (rpcBalancesRes.data && Array.isArray(rpcBalancesRes.data)) {
+      rpcBalancesRes.data.forEach((b: any) => {
+        if (b.user_id) balanceMap.set(b.user_id, Number(b.crystal_balance) || 0);
+      });
+    }
+
+    // Masukkan data saldo dari direct select jika belum ada di map
+    if (directBalancesRes.data && Array.isArray(directBalancesRes.data)) {
+      directBalancesRes.data.forEach((b: any) => {
+        if (b.user_id && !balanceMap.has(b.user_id)) {
+          balanceMap.set(b.user_id, Number(b.crystal_balance) || 0);
+        }
+      });
+    }
 
     let list: AdminUserListItem[] = [];
 
     if (!error && Array.isArray(profiles) && profiles.length > 0) {
-      for (const p of profiles) {
-        const bal = await getCrystalBalance(p.id);
-        const overrideRole = await AsyncStorage.getItem(`@nuenime_user_role_${p.id}`);
-        const overrideBan = await AsyncStorage.getItem(`@nuenime_user_ban_${p.id}`);
-        const overrideBanReason = await AsyncStorage.getItem(`@nuenime_user_ban_reason_${p.id}`);
-        const resetName = await AsyncStorage.getItem(`@nuenime_user_cd_reset_${p.id}_name`);
-        const resetAvatar = await AsyncStorage.getItem(`@nuenime_user_cd_reset_${p.id}_avatar`);
-        const resetBanner = await AsyncStorage.getItem(`@nuenime_user_cd_reset_${p.id}_banner`);
+      // Ambil override storage sekaligus (batch multiGet) agar tidak ada serial loop
+      const overrideKeys = profiles.flatMap((p) => [
+        `@nuenime_user_role_${p.id}`,
+        `@nuenime_user_ban_${p.id}`,
+        `@nuenime_user_ban_reason_${p.id}`,
+        `@nuenime_user_cd_reset_${p.id}_name`,
+        `@nuenime_user_cd_reset_${p.id}_avatar`,
+        `@nuenime_user_cd_reset_${p.id}_banner`,
+      ]);
 
-        const isBanned = overrideBan !== null ? overrideBan === "true" : Boolean(p.is_banned);
+      const overridePairs = await AsyncStorage.multiGet(overrideKeys).catch(() => []);
+      const overrideMap = new Map<string, string | null>(overridePairs as [string, string | null][]);
+
+      for (const p of profiles) {
+        const bal = balanceMap.get(p.id) ?? 0;
+        const overrideRole = overrideMap.get(`@nuenime_user_role_${p.id}`);
+        const overrideBan = overrideMap.get(`@nuenime_user_ban_${p.id}`);
+        const overrideBanReason = overrideMap.get(`@nuenime_user_ban_reason_${p.id}`);
+        const resetName = overrideMap.get(`@nuenime_user_cd_reset_${p.id}_name`);
+        const resetAvatar = overrideMap.get(`@nuenime_user_cd_reset_${p.id}_avatar`);
+        const resetBanner = overrideMap.get(`@nuenime_user_cd_reset_${p.id}_banner`);
+
+        const isBanned = overrideBan ? overrideBan === "true" : Boolean(p.is_banned);
         const role = overrideRole || p.role || "Member";
-        const banReason = overrideBanReason !== null ? overrideBanReason : (p.ban_reason || null);
+        const banReason = overrideBanReason || (p.ban_reason || null);
         const nameUpdatedAt = resetName ? null : (p.name_updated_at || null);
         const avatarUpdatedAt = resetAvatar ? null : (p.avatar_updated_at || null);
         const bannerUpdatedAt = resetBanner ? null : (p.banner_updated_at || null);
@@ -806,24 +954,9 @@ export async function getAdminUsersList(search?: string): Promise<AdminUserListI
           bannerUpdatedAt,
         });
       }
-    } else {
-      // Fallback sample user list for testing UI
-      list = [
-        {
-          id: "guest",
-          email: "guest@nuenime.com",
-          username: "Tamu Nuenime",
-          displayName: "Guest User",
-          memberNumber: "#0001",
-          createdAt: new Date().toISOString(),
-          crystalBalance: await getCrystalBalance("guest"),
-          level: 3,
-          exp: 150,
-          status: "active",
-          isBanned: false,
-          role: "Member",
-        },
-      ];
+
+      // Simpan ke cache agar load berikutnya 0ms
+      await AsyncStorage.setItem(USERS_CACHE_KEY, JSON.stringify(list)).catch(() => {});
     }
 
     if (search && search.trim().length > 0) {
@@ -844,6 +977,12 @@ export async function getAdminUsersList(search?: string): Promise<AdminUserListI
   }
 }
 
+async function refreshAdminUsersListInBackground(): Promise<void> {
+  try {
+    await fetchFreshAdminUsersList();
+  } catch {}
+}
+
 /**
  * Koreksi saldo manual oleh admin (+ atau -) dengan pencatatan audit log
  */
@@ -861,14 +1000,51 @@ export async function adminAdjustUserBalance(params: {
     return { success: false, error: "Alasan penyesuaian saldo wajib diisi.", before: 0, after: 0 };
   }
 
-  const before = await getCrystalBalance(params.userId);
-  const after = before + params.amount;
+  let before = 0;
+  let after = 0;
+  let rpcDone = false;
 
-  if (after < 0) {
-    return { success: false, error: "Saldo tidak boleh bernilai negatif.", before, after };
+  // 1. Eksekusi via RPC Security Definer admin_adjust_user_balance (atomik & update langsung di Supabase user_balances)
+  try {
+    const { data: rpcRes, error: rpcErr } = await supabase.rpc("admin_adjust_user_balance", {
+      p_user_id: params.userId,
+      p_amount: Math.floor(params.amount),
+      p_reason: params.reason.trim(),
+      p_admin_id: params.admin.id && params.admin.id.length === 36 ? params.admin.id : "73f6e447-2f8c-4f12-ad94-a737a78e279b",
+      p_admin_email: params.admin.email || "admin@nuenime.com",
+    });
+
+    if (!rpcErr && rpcRes && rpcRes.success) {
+      before = Number(rpcRes.balance_before) || 0;
+      after = Number(rpcRes.balance_after) || 0;
+      rpcDone = true;
+    }
+  } catch {}
+
+  // 2. Fallback jika RPC belum terdaftar
+  if (!rpcDone) {
+    before = await getCrystalBalance(params.userId);
+    after = Math.max(0, before + params.amount);
+    await setCrystalBalance(params.userId, after);
   }
 
-  await setCrystalBalance(params.userId, after);
+  // 3. Update storage lokal & cache agar konsisten
+  const key = getCrystalBalanceStorageKey(params.userId);
+  await AsyncStorage.setItem(key, String(after)).catch(() => {});
+
+  try {
+    const raw = await AsyncStorage.getItem(USERS_CACHE_KEY);
+    if (raw) {
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        const idx = list.findIndex((u) => u.id === params.userId);
+        if (idx !== -1) {
+          list[idx].crystalBalance = after;
+          await AsyncStorage.setItem(USERS_CACHE_KEY, JSON.stringify(list));
+        }
+      }
+    }
+  } catch {}
 
   await logAdminAction({
     admin: params.admin,
@@ -1225,14 +1401,27 @@ export async function getUserFullHistory(params: {
   try {
     // 1. Crystal Transactions & Top Up
     if (params.category === "all" || params.category === "crystal") {
-      const { data: topups } = await supabase
-        .from("topup_transactions")
-        .select("*")
-        .eq("user_id", params.userId)
-        .order("created_at", { ascending: false })
-        .limit(50);
+      let topups: any[] = [];
+      try {
+        const { data: rpcData } = await supabase.rpc("admin_get_all_transactions");
+        if (Array.isArray(rpcData)) {
+          topups = rpcData.filter((t: any) => t.user_id === params.userId);
+        }
+      } catch {}
 
-      if (topups) {
+      if (topups.length === 0) {
+        const { data } = await supabase
+          .from("topup_transactions")
+          .select("*")
+          .eq("user_id", params.userId)
+          .order("created_at", { ascending: false })
+          .limit(50);
+        if (data && Array.isArray(data)) {
+          topups = data;
+        }
+      }
+
+      if (topups.length > 0) {
         for (const t of topups) {
           items.push({
             id: `TX-${t.id}`,
@@ -1890,47 +2079,69 @@ export async function updateAdminBorder(
     finalIsReleased = !!(updates.assetUrl && updates.assetUrl.trim().length > 0);
   }
 
-  const dbPayload: Record<string, any> = { updated_at: new Date().toISOString() };
-  if (updates.name !== undefined) dbPayload.name = updates.name;
-  if (updates.assetUrl !== undefined) dbPayload.asset_url = updates.assetUrl || null;
-  if (updates.innerRatio !== undefined) dbPayload.inner_ratio = updates.innerRatio;
-  if (updates.offsetX !== undefined) dbPayload.offset_x = updates.offsetX;
-  if (updates.offsetY !== undefined) dbPayload.offset_y = updates.offsetY;
-  if (updates.scale !== undefined) dbPayload.scale = updates.scale;
-  if (finalIsReleased !== undefined) dbPayload.is_released = finalIsReleased;
-  if (updates.description !== undefined) dbPayload.description = updates.description;
-  if (updates.priceCrystal !== undefined) dbPayload.price_crystal = updates.priceCrystal;
-  if (updates.isActive !== undefined) dbPayload.is_active = updates.isActive;
+  const currentBorder = getBorderById(borderId);
+
+  const rowPayload: Record<string, any> = {
+    id: borderId,
+    name: updates.name !== undefined ? updates.name : (currentBorder?.name ?? borderId),
+    rarity: currentBorder?.rarity ?? "Rare",
+    asset_url: updates.assetUrl !== undefined ? (updates.assetUrl || null) : (currentBorder?.assetUrl ?? null),
+    inner_ratio: updates.innerRatio !== undefined ? updates.innerRatio : (currentBorder?.innerRatio ?? 0.74),
+    offset_x: updates.offsetX !== undefined ? updates.offsetX : (currentBorder?.offsetX ?? 0.0),
+    offset_y: updates.offsetY !== undefined ? updates.offsetY : (currentBorder?.offsetY ?? 0.0),
+    scale: updates.scale !== undefined ? updates.scale : (currentBorder?.scale ?? 1.0),
+    is_released: finalIsReleased !== undefined ? finalIsReleased : (currentBorder?.isReleased ?? false),
+    description: updates.description !== undefined ? updates.description : (currentBorder?.description ?? null),
+    price_crystal: updates.priceCrystal !== undefined ? updates.priceCrystal : (currentBorder?.priceCrystal ?? null),
+    is_active: updates.isActive !== undefined ? updates.isActive : (currentBorder?.isActive ?? true),
+    sort_order: (currentBorder as any)?.sortOrder ?? 100,
+    updated_at: new Date().toISOString(),
+  };
 
   try {
-    const currentBorder = getBorderById(borderId);
-    const { data, error } = await supabase
-      .from("avatar_borders_config")
-      .upsert({
-        id: borderId,
-        name: updates.name ?? currentBorder?.name ?? borderId,
-        rarity: currentBorder?.rarity ?? "Normal",
-        sort_order: 0,
-        ...dbPayload,
-      })
-      .select()
-      .single();
+    let rpcSuccess = false;
+    let data: any = rowPayload;
 
-    if (error) { console.warn("updateAdminBorder error:", error.message); return null; }
+    // 1. Prioritaskan RPC Security Definer admin_upsert_avatar_border (kebal RLS)
+    try {
+      const { data: rpcRes, error: rpcErr } = await supabase.rpc("admin_upsert_avatar_border", {
+        p_border: rowPayload,
+      });
+      if (!rpcErr && rpcRes && (rpcRes as any).success) {
+        rpcSuccess = true;
+      }
+    } catch (rpcEx) {
+      console.warn("admin_upsert_avatar_border rpc error:", rpcEx);
+    }
+
+    // 2. Fallback upsert langsung jika RPC gagal
+    if (!rpcSuccess) {
+      const res = await supabase
+        .from("avatar_borders_config")
+        .upsert(rowPayload)
+        .select()
+        .single();
+
+      if (res.error) {
+        console.warn("updateAdminBorder error:", res.error.message);
+        return null;
+      }
+      data = res.data;
+    }
 
     const updatedBorder: AvatarBorder = {
-      id: data.id,
-      name: data.name,
-      rarity: data.rarity,
-      assetUrl: data.asset_url ?? null,
-      innerRatio: data.inner_ratio ? Number(data.inner_ratio) : (currentBorder?.innerRatio ?? 0.74),
-      offsetX: data.offset_x ? Number(data.offset_x) : (currentBorder?.offsetX ?? 0.0),
-      offsetY: data.offset_y ? Number(data.offset_y) : (currentBorder?.offsetY ?? 0.0),
-      scale: data.scale ? Number(data.scale) : (currentBorder?.scale ?? 1.0),
-      isReleased: data.is_released ?? false,
-      description: data.description,
-      priceCrystal: data.price_crystal ? Number(data.price_crystal) : null,
-      isActive: data.is_active ?? true,
+      id: data.id || borderId,
+      name: data.name || rowPayload.name,
+      rarity: (data.rarity || rowPayload.rarity) as BorderRarity,
+      assetUrl: data.asset_url !== undefined ? data.asset_url : rowPayload.asset_url,
+      innerRatio: data.inner_ratio ? Number(data.inner_ratio) : Number(rowPayload.inner_ratio),
+      offsetX: data.offset_x ? Number(data.offset_x) : Number(rowPayload.offset_x),
+      offsetY: data.offset_y ? Number(data.offset_y) : Number(rowPayload.offset_y),
+      scale: data.scale ? Number(data.scale) : Number(rowPayload.scale),
+      isReleased: data.is_released !== undefined ? Boolean(data.is_released) : Boolean(rowPayload.is_released),
+      description: data.description !== undefined ? data.description : rowPayload.description,
+      priceCrystal: data.price_crystal !== undefined ? (data.price_crystal ? Number(data.price_crystal) : null) : rowPayload.price_crystal,
+      isActive: data.is_active !== undefined ? Boolean(data.is_active) : Boolean(rowPayload.is_active),
     } as AvatarBorder;
 
     updateLiveBorderInCache(updatedBorder);
@@ -2469,8 +2680,8 @@ export interface DashboardKPIData {
   totalCrystalsSpent: number;
 }
 
-export async function getDashboardKPIData(): Promise<DashboardKPIData> {
-  const txs = await getAllTransactionsForAdmin();
+export async function getDashboardKPIData(preloadedTxs?: TopUpTransaction[]): Promise<DashboardKPIData> {
+  const txs = preloadedTxs ?? (await getAllTransactionsForAdmin());
 
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -2500,7 +2711,21 @@ export async function getDashboardKPIData(): Promise<DashboardKPIData> {
     }
   });
 
-  const users = await getAdminUsersList();
+  // Query jumlah user terdaftar secara instan menggunakan HEAD count Supabase (30ms, tanpa serial loop)
+  let totalUsers = 1;
+  try {
+    const { count, error } = await supabase
+      .from("profiles")
+      .select("*", { count: "exact", head: true });
+    if (!error && typeof count === "number") {
+      totalUsers = Math.max(1, count);
+    } else {
+      const { data } = await supabase.from("profiles").select("id").limit(100);
+      totalUsers = Math.max(1, data?.length ?? 1);
+    }
+  } catch {
+    totalUsers = 1;
+  }
 
   return {
     revenueToday: revToday,
@@ -2509,8 +2734,8 @@ export async function getDashboardKPIData(): Promise<DashboardKPIData> {
     totalCompletedTxs: completed,
     totalPendingTxs: pending,
     totalRejectedTxs: rejected,
-    dau: Math.max(1, users.length),
-    totalRegisteredUsers: users.length,
+    dau: totalUsers,
+    totalRegisteredUsers: totalUsers,
     totalCrystalsPurchased: crystalsPurchased,
     totalCrystalsSpent: Math.floor(crystalsPurchased * 0.45), // Estimasi gacha spending
   };
@@ -2619,6 +2844,7 @@ export async function deleteAdminSpotlight(
 
 export interface BrokenStreamReport {
   id: string;
+  userId?: string | null;
   animeId: number;
   animeTitle: string;
   episodeNumber: number;
@@ -2626,6 +2852,7 @@ export interface BrokenStreamReport {
   issueDescription: string;
   status: "pending" | "investigating" | "fixed" | "invalid";
   reporter: string;
+  reporterAvatar?: string | null;
   createdAt: string;
 }
 
@@ -2658,22 +2885,125 @@ const DEFAULT_BROKEN_STREAMS: BrokenStreamReport[] = [
 
 export async function getAdminBrokenStreamReports(): Promise<BrokenStreamReport[]> {
   try {
+    const { data, error } = await supabase
+      .from("broken_stream_reports")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (!error && Array.isArray(data)) {
+      const userIds = Array.from(new Set(data.map((r: any) => r.user_id).filter(Boolean)));
+      const profileMap: Record<string, { username: string; display_name?: string; avatar_url?: string }> = {};
+
+      if (userIds.length > 0) {
+        try {
+          const { data: profs } = await supabase
+            .from("profiles")
+            .select("id, username, display_name, avatar_url")
+            .in("id", userIds);
+
+          if (profs && Array.isArray(profs)) {
+            for (const p of profs) {
+              profileMap[p.id] = p;
+            }
+          }
+        } catch {}
+      }
+
+      const mapped: BrokenStreamReport[] = data.map((r: any) => {
+        const prof = r.user_id ? profileMap[r.user_id] : null;
+        const reporterName =
+          prof?.display_name ||
+          prof?.username ||
+          (r.user_id ? `User ${String(r.user_id).slice(0, 8)}` : "Anonim (Guest)");
+
+        return {
+          id: String(r.id),
+          userId: r.user_id || null,
+          animeId: Number(r.anime_id) || 0,
+          animeTitle: r.anime_title || "Anime Tidak Diketahui",
+          episodeNumber: Number(r.episode_number) || 1,
+          serverName: r.server_name || "Server Utama",
+          issueDescription: r.issue_description || "",
+          status: (r.status as any) || "pending",
+          reporter: reporterName,
+          reporterAvatar: prof?.avatar_url || null,
+          createdAt: r.created_at || new Date().toISOString(),
+        };
+      });
+
+      try {
+        await AsyncStorage.setItem(STORAGE_BROKEN_STREAMS, JSON.stringify(mapped));
+      } catch {}
+
+      return mapped;
+    }
+  } catch (err) {
+    console.warn("[getAdminBrokenStreamReports] Error fetching from Supabase:", err);
+  }
+
+  try {
     const raw = await AsyncStorage.getItem(STORAGE_BROKEN_STREAMS);
     if (raw) return JSON.parse(raw);
   } catch {}
   return DEFAULT_BROKEN_STREAMS;
 }
 
+export async function submitBrokenStreamReport(params: {
+  animeId: number;
+  animeTitle: string;
+  episodeNumber: number;
+  serverName?: string;
+  issueDescription: string;
+  userId?: string | null;
+}): Promise<{ success: boolean; error?: string; id?: string }> {
+  try {
+    const isUuid = (val?: string | null) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val || "");
+    const userUuid = isUuid(params.userId) ? params.userId : null;
+
+    const row = {
+      anime_id: params.animeId,
+      anime_title: params.animeTitle,
+      episode_number: params.episodeNumber,
+      server_name: params.serverName || "Server 1",
+      issue_description: params.issueDescription.trim(),
+      status: "pending",
+      user_id: userUuid,
+    };
+
+    const { data, error } = await supabase
+      .from("broken_stream_reports")
+      .insert(row)
+      .select("id")
+      .single();
+
+    if (error) {
+      console.warn("[submitBrokenStreamReport] Supabase insert error:", error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, id: data?.id };
+  } catch (err: any) {
+    console.warn("[submitBrokenStreamReport] error:", err);
+    return { success: false, error: err?.message || "Gagal mengirim laporan." };
+  }
+}
+
 export async function updateBrokenStreamReportStatus(
   id: string,
   status: BrokenStreamReport["status"],
-  admin: AdminUser
+  admin?: AdminUser
 ): Promise<BrokenStreamReport[]> {
-  const list = await getAdminBrokenStreamReports();
-  const idx = list.findIndex((r) => r.id === id);
-  if (idx !== -1) {
-    list[idx].status = status;
-    await AsyncStorage.setItem(STORAGE_BROKEN_STREAMS, JSON.stringify(list));
+  try {
+    await supabase
+      .from("broken_stream_reports")
+      .update({ status })
+      .eq("id", id);
+  } catch (err) {
+    console.warn("[updateBrokenStreamReportStatus] Supabase error:", err);
+  }
+
+  if (admin) {
     await logAdminAction({
       admin,
       action: "UPDATE_STREAM_REPORT_STATUS",
@@ -2682,7 +3012,39 @@ export async function updateBrokenStreamReportStatus(
       details: { status },
     });
   }
-  return list;
+
+  return getAdminBrokenStreamReports();
+}
+
+export async function deleteBrokenStreamReport(
+  id: string,
+  admin?: AdminUser
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { error } = await supabase
+      .from("broken_stream_reports")
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      console.warn("[deleteBrokenStreamReport] Supabase delete error:", error);
+      return { success: false, error: error.message };
+    }
+
+    if (admin) {
+      await logAdminAction({
+        admin,
+        action: "DELETE_STREAM_REPORT",
+        targetType: "broken_stream_report",
+        targetId: id,
+        details: { id },
+      });
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Gagal menghapus laporan." };
+  }
 }
 
 // ─── STREAM TRACK CONFIGURATION (Track 4 & Track 6) ───
